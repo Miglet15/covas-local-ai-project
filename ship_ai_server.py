@@ -8,7 +8,8 @@ from datetime import datetime
 from collections import OrderedDict
 
 # ── Logging ───────────────────────────────────────────────────────────────────
-LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "covas_session.log")
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "covas_session.log")
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 _log_lock = threading.Lock()
 
 def log(msg: str):
@@ -98,7 +99,9 @@ except Exception as e:
 
 # ── Load Config ───────────────────────────────────────────────────────────────
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
+DATA_DIR    = os.path.join(SCRIPT_DIR, "data")
+LOGS_DIR    = os.path.join(SCRIPT_DIR, "logs")
+CONFIG_FILE = os.path.join(SCRIPT_DIR, "config", "config.json")
 
 DEFAULT_CONFIG = {
     "ollama_base_url":       "http://localhost:11434",
@@ -166,7 +169,7 @@ if MEMORY_ENABLED:
         log(f"WARN: Memory client failed to load ({_e}) — memory system disabled.")
 
 # ── Load Lore Book ────────────────────────────────────────────────────────────
-LORE_FILE     = os.path.join(SCRIPT_DIR, "elite_lore.md")
+LORE_FILE     = os.path.join(DATA_DIR, "elite_lore.md")
 LORE_SECTIONS = {}
 
 if os.path.exists(LORE_FILE):
@@ -183,10 +186,10 @@ if os.path.exists(LORE_FILE):
     except Exception as e:
         log(f"WARN: Could not load lore book: {e}")
 else:
-    log(f"WARN: No lore book found — place elite_lore.md next to this script.")
+    log(f"WARN: No lore book found — place elite_lore.md in the data/ folder.")
 
 # ── Load Commander Profile ────────────────────────────────────────────────────
-PROFILE_FILE    = os.path.join(SCRIPT_DIR, "commander_profile.md")
+PROFILE_FILE    = os.path.join(DATA_DIR, "commander_profile.md")
 COMMANDER_PROFILE = ""
 
 if os.path.exists(PROFILE_FILE):
@@ -197,7 +200,7 @@ if os.path.exists(PROFILE_FILE):
     except Exception as e:
         log(f"WARN: Could not load commander profile: {e}")
 else:
-    log(f"WARN: No commander profile found — place commander_profile.md next to this script.")
+    log(f"WARN: No commander profile found — place commander_profile.md in the data/ folder.")
 
 # ── Lore Keyword Map ──────────────────────────────────────────────────────────
 KEYWORD_MAP = {
@@ -761,95 +764,508 @@ class ChatRequest(BaseModel):
 
 @app.get("/", response_class=HTMLResponse)
 def status_page():
-    uptime  = datetime.now() - _stats["start_time"]
-    hours, rem = divmod(int(uptime.total_seconds()), 3600)
-    mins, secs  = divmod(rem, 60)
-    uptime_str  = f"{hours}h {mins}m {secs}s"
-    lore_status = f"{len(LORE_SECTIONS)} sections loaded" if LORE_SECTIONS else "Not loaded"
-    profile_status = f"{len(COMMANDER_PROFILE):,} chars" if COMMANDER_PROFILE else "Not loaded"
+    # ── UNIT-01 local stats ───────────────────────────────────────────────────
+    uptime      = datetime.now() - _stats["start_time"]
+    h, rem      = divmod(int(uptime.total_seconds()), 3600)
+    m, s        = divmod(rem, 60)
+    uptime_str  = f"{h}h {m}m {s}s"
+    last_req    = _stats["last_request"].strftime("%H:%M:%S") if _stats["last_request"] else "---"
     cache_count = len(_search_cache)
-    last_req = _stats["last_request"].strftime("%H:%M:%S") if _stats["last_request"] else "None"
-    memory_session = _memory.session_id if _memory is not None else "—"
+    mem_session = _memory.session_id if _memory is not None else "---"
+    total_searches = _stats['searches_inara'] + _stats['searches_general']
 
-    # Ping Apollo memory service for live stats
-    mem_online = False
-    mem_total  = mem_sessions = mem_missions = mem_last = mem_errors = "—"
+    lore_cls     = "ok"   if LORE_SECTIONS     else "warn"
+    lore_txt     = f"{len(LORE_SECTIONS)} sections" if LORE_SECTIONS else "Not loaded"
+    profile_cls  = "ok"   if COMMANDER_PROFILE else "warn"
+    profile_txt  = f"{len(COMMANDER_PROFILE):,} chars" if COMMANDER_PROFILE else "Not loaded"
+    fail_cls     = "err"  if _stats["requests_failed"] > 0 else "ok"
+
+    # ── Apollo memory service stats ───────────────────────────────────────────
+    apollo_ok           = False
+    mem_total           = "---"
+    mem_db_sessions     = "---"
+    mem_entities        = "---"
+    mem_db_missions     = "---"
+    mem_active_missions = "---"
+    mem_errors          = "---"
+    mem_last_ingest     = "---"
+    by_category         = {}
+    recent_memories     = []
+    active_missions     = []
+
     if _memory is not None:
         try:
             import requests as _req
-            _r = _req.get(f"{MEMORY_SERVICE_URL}/stats", timeout=2)
+            _r = _req.get(f"{MEMORY_SERVICE_URL}/stats", timeout=3)
             if _r.status_code == 200:
-                _ms = _r.json()
-                mem_online   = True
-                mem_total    = _ms.get("total_memories", "—")
-                mem_sessions = _ms.get("total_sessions", "—")
-                mem_missions = _ms.get("active_missions", "—")
-                mem_last     = _ms.get("last_ingest") or "None"
-                mem_errors   = _ms.get("errors", "—")
+                _d                  = _r.json()
+                apollo_ok           = True
+                mem_total           = _d.get("total_memories", 0)
+                mem_db_sessions     = _d.get("total_sessions", 0)
+                mem_entities        = _d.get("total_entities", 0)
+                mem_db_missions     = _d.get("total_missions", 0)
+                mem_active_missions = _d.get("active_missions", 0)
+                mem_errors          = _d.get("errors", 0)
+                mem_last_ingest     = _d.get("last_ingest") or "None yet"
+                by_category         = _d.get("by_category") or {}
+                recent_memories     = _d.get("recent_memories") or []
+            if apollo_ok:
+                _rm = _req.get(f"{MEMORY_SERVICE_URL}/ed/missions/active", timeout=2)
+                if _rm.status_code == 200:
+                    active_missions = _rm.json().get("missions", [])
         except Exception:
             pass
-    mem_status_txt = (f"● Online → {MEMORY_SERVICE_URL}" if mem_online
-                      else ("● Unreachable" if _memory is not None else "Disabled"))
-    mem_cls = "ok" if mem_online else ("err" if _memory is not None else "warn")
+
+    apollo_cls = "ok" if apollo_ok else ("err" if _memory is not None else "dim")
+    apollo_lbl = "ONLINE" if apollo_ok else ("UNREACHABLE" if _memory is not None else "DISABLED")
+    err_color  = "#ff4455" if mem_errors not in ("---", 0, "0") else "#3de87a"
+
+    cat_colors = {
+        "general": "#c89040", "elite_dangerous": "#ff8020",
+        "person": "#60b8d8", "place": "#80c860",
+        "preference": "#a878cc", "task": "#e06050",
+    }
+
+    # Build category rows
+    cat_rows = ""
+    for cat, count in by_category.items():
+        col = cat_colors.get(cat, "#6080a0")
+        cat_rows += (
+            f'<div class="cat-row">'
+            f'<span class="tag" style="color:{col};border-color:{col}30">{cat}</span>'
+            f'<span class="cat-count">{count}</span>'
+            f'</div>'
+        )
+    if not cat_rows:
+        cat_rows = '<div class="dim-txt" style="padding:8px 0;font-size:11px">No memories recorded yet</div>'
+
+    # Build recent memory rows
+    mem_rows = ""
+    for rec in recent_memories:
+        ts      = str(rec.get("created_at",""))[:16].replace("T"," ")
+        cat     = rec.get("category","")
+        topic   = rec.get("topic","")
+        summary = rec.get("summary","")
+        short   = (summary[:100] + "…") if len(summary) > 100 else summary
+        col     = cat_colors.get(cat, "#6080a0")
+        mem_rows += (
+            f'<tr><td class="ts-cell">{ts}</td>'
+            f'<td><span class="tag" style="color:{col};border-color:{col}30">{cat}</span></td>'
+            f'<td><div class="topic-txt">{topic}</div>'
+            f'<div class="sum-txt">{short}</div></td></tr>'
+        )
+    if not mem_rows:
+        mem_rows = '<tr><td colspan="3" class="empty-cell">NO MEMORY RECORDS FOUND</td></tr>'
+
+    # Build mission rows
+    mission_rows = ""
+    for ms in active_missions:
+        mission_rows += (
+            f'<tr>'
+            f'<td><span class="mission-tag">{ms.get("mission_type","UNKNOWN")}</span></td>'
+            f'<td>{ms.get("giver","---")}</td>'
+            f'<td>{ms.get("origin_system","?")} &rsaquo; {ms.get("origin_station","?")}</td>'
+            f'<td>{ms.get("destination_system","?")} &rsaquo; {ms.get("destination_station","?")}</td>'
+            f'<td class="credit-txt">{ms.get("reward","---")}</td>'
+            f'</tr>'
+        )
+    if not mission_rows:
+        mission_rows = '<tr><td colspan="5" class="empty-cell">NO ACTIVE MISSIONS ON RECORD</td></tr>'
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     html = f"""<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>COVAS Ship AI — Status</title>
+  <meta charset="UTF-8">
   <meta http-equiv="refresh" content="10">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>COVAS // SYSTEM STATUS</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
   <style>
-    body {{ font-family: 'Courier New', monospace; background: #0a0a0f; color: #e0a020; margin: 40px; }}
-    h1 {{ color: #ff6a00; letter-spacing: 3px; }}
-    h2 {{ color: #cc8800; border-bottom: 1px solid #333; padding-bottom: 6px; }}
-    table {{ border-collapse: collapse; width: 500px; }}
-    td {{ padding: 6px 16px; border: 1px solid #333; }}
-    td:first-child {{ color: #888; width: 200px; }}
-    .ok {{ color: #44ff88; }} .warn {{ color: #ffaa00; }} .err {{ color: #ff4444; }}
-    .footer {{ color: #444; font-size: 11px; margin-top: 30px; }}
-    a {{ color: #cc8800; }}
+    :root {{
+      --bg:      #05070e;
+      --bg2:     #080c16;
+      --bg3:     #0a0f1c;
+      --border:  #182038;
+      --or:      #e06a10;
+      --or2:     #ff8830;
+      --or-glow: rgba(224,106,16,0.15);
+      --am:      #c09020;
+      --teal:    #20a0b0;
+      --text:    #6888b0;
+      --hi:      #a8c4e0;
+      --ok:      #30d870;
+      --err:     #f03848;
+      --warn:    #e09020;
+      --dim:     #283850;
+      --mono:    'Share Tech Mono', monospace;
+      --head:    'Rajdhani', sans-serif;
+    }}
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+
+    body {{
+      font-family: var(--mono);
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }}
+
+    /* Scanline overlay */
+    body::before {{
+      content: '';
+      position: fixed; inset: 0; pointer-events: none; z-index: 100;
+      background: repeating-linear-gradient(
+        0deg, transparent, transparent 3px,
+        rgba(0,0,0,0.07) 3px, rgba(0,0,0,0.07) 4px
+      );
+    }}
+
+    /* Ambient vignette */
+    body::after {{
+      content: '';
+      position: fixed; inset: 0; pointer-events: none; z-index: 99;
+      background: radial-gradient(ellipse 80% 80% at 50% 50%, transparent 40%, rgba(0,0,0,0.6) 100%);
+    }}
+
+    /* ── HEADER ── */
+    .hdr {{
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 32px;
+      height: 84px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, #0b1020 0%, var(--bg) 100%);
+      position: relative;
+    }}
+    .hdr::after {{
+      content: '';
+      position: absolute; bottom: 0; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, transparent, var(--or), transparent);
+      opacity: 0.4;
+    }}
+    .hdr-glow {{
+      position: absolute; inset: 0; pointer-events: none;
+      background: radial-gradient(ellipse 50% 150% at 50% -50%, rgba(224,106,16,0.08), transparent);
+    }}
+
+    .logo {{
+      display: flex; align-items: baseline; gap: 12px; position: relative;
+    }}
+    .logo-main {{
+      font-family: var(--head); font-size: 42px; font-weight: 700;
+      letter-spacing: 8px; color: var(--or2);
+      text-shadow: 0 0 24px rgba(255,136,48,0.5), 0 0 48px rgba(255,136,48,0.15);
+    }}
+    .logo-slash {{
+      color: var(--dim); font-family: var(--head); font-size: 32px; font-weight: 300;
+    }}
+    .logo-sub {{
+      font-family: var(--head); font-size: 16px; font-weight: 300;
+      letter-spacing: 5px; color: var(--am); text-transform: uppercase;
+    }}
+
+    .hdr-right {{
+      text-align: right; font-size: 13px; color: var(--dim);
+      line-height: 2; letter-spacing: 1px;
+    }}
+    .hdr-right em {{ font-style: normal; color: var(--am); }}
+
+    /* ── STATUS BAR ── */
+    .sbar {{
+      display: flex; align-items: stretch;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg2);
+      height: 52px;
+    }}
+    .spill {{
+      display: flex; align-items: center; gap: 10px;
+      padding: 0 24px; font-family: var(--head);
+      font-size: 14px; font-weight: 600; letter-spacing: 3px;
+      text-transform: uppercase; border-right: 1px solid var(--border);
+    }}
+    .spill.right {{ margin-left: auto; border-right: none; border-left: 1px solid var(--border); font-weight: 300; color: var(--dim); font-size: 13px; }}
+    .dot {{
+      width: 11px; height: 11px; border-radius: 50%;
+      background: currentColor; flex-shrink: 0;
+    }}
+    .ok   {{ color: var(--ok); }}
+    .err  {{ color: var(--err); }}
+    .warn {{ color: var(--warn); }}
+    .dim  {{ color: var(--dim); }}
+    @keyframes pulse {{ 0%,100%{{opacity:1}} 50%{{opacity:0.3}} }}
+    .pulse {{ animation: pulse 2s ease-in-out infinite; }}
+
+    /* ── BIG STATS ── */
+    .bstats {{
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      border-bottom: 1px solid var(--border);
+    }}
+    .bstat {{
+      padding: 26px 32px; border-right: 1px solid var(--border);
+      position: relative; background: var(--bg);
+      transition: background 0.2s;
+    }}
+    .bstat:last-child {{ border-right: none; }}
+    .bstat::before {{
+      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+      background: linear-gradient(90deg, var(--or), transparent);
+      opacity: 0;
+      transition: opacity 0.2s;
+    }}
+    .bstat:hover {{ background: #080c18; }}
+    .bstat:hover::before {{ opacity: 0.5; }}
+    .bnum {{
+      font-family: var(--head); font-size: 58px; font-weight: 700;
+      color: var(--or2); line-height: 1;
+      text-shadow: 0 0 20px rgba(255,136,48,0.2);
+    }}
+    .blbl {{
+      font-family: var(--head); font-size: 12px; font-weight: 500;
+      letter-spacing: 3px; text-transform: uppercase;
+      color: var(--dim); margin-top: 5px;
+    }}
+    .bsub {{ font-size: 12px; color: #1e2e48; margin-top: 3px; }}
+
+    /* ── MAIN LAYOUT ── */
+    .layout {{
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      min-height: calc(100vh - 64px - 40px - 80px - 48px);
+      border-bottom: 1px solid var(--border);
+    }}
+    .lcol {{ border-right: 1px solid var(--border); display: flex; flex-direction: column; }}
+
+    /* ── PANELS ── */
+    .panel {{ border-bottom: 1px solid var(--border); }}
+    .panel:last-child {{ border-bottom: none; flex: 1; }}
+    .ptitle {{
+      font-family: var(--head); font-size: 12px; font-weight: 600;
+      letter-spacing: 3px; text-transform: uppercase;
+      color: var(--or); padding: 9px 20px;
+      background: linear-gradient(90deg, rgba(224,106,16,0.07), transparent);
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 8px;
+    }}
+    .ptitle::before {{
+      content: '◆'; font-size: 7px; color: var(--or2);
+    }}
+
+    /* Corner bracket decoration for panels */
+    .bracketed {{ position: relative; }}
+    .bracketed::before, .bracketed::after {{
+      content: ''; position: absolute;
+      width: 8px; height: 8px;
+      border-color: var(--or); border-style: solid;
+      opacity: 0.4;
+    }}
+    .bracketed::before {{ top: 8px; left: 8px; border-width: 1px 0 0 1px; }}
+    .bracketed::after  {{ bottom: 8px; right: 8px; border-width: 0 1px 1px 0; }}
+
+    /* Info table */
+    .itable {{ width: 100%; border-collapse: collapse; }}
+    .itable td {{
+      padding: 9px 24px; font-size: 13px;
+      border-bottom: 1px solid #0e1624;
+    }}
+    .itable tr:last-child td {{ border-bottom: none; }}
+    .itable td:first-child {{ color: var(--dim); width: 160px; letter-spacing: 0.5px; }}
+    .itable td:last-child {{ color: var(--hi); }}
+
+    /* Category list */
+    .catlist {{ padding: 16px 24px; display: flex; flex-direction: column; gap: 9px; }}
+    .cat-row {{ display: flex; align-items: center; justify-content: space-between; }}
+    .tag {{
+      font-size: 12px; border: 1px solid; border-radius: 1px;
+      padding: 2px 9px; letter-spacing: 1.5px; text-transform: uppercase;
+      font-family: var(--head); font-weight: 600;
+    }}
+    .cat-count {{ font-family: var(--head); font-size: 20px; font-weight: 600; color: var(--hi); }}
+
+    /* Memory table */
+    .mtable {{ width: 100%; border-collapse: collapse; }}
+    .mtable th {{
+      font-family: var(--head); font-size: 11px; font-weight: 500;
+      letter-spacing: 3px; text-transform: uppercase;
+      color: var(--dim); padding: 11px 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg2); text-align: left;
+    }}
+    .mtable td {{
+      padding: 11px 20px; font-size: 13px;
+      border-bottom: 1px solid #0b1020;
+      vertical-align: top; transition: background 0.15s;
+    }}
+    .mtable tr:hover td {{ background: rgba(224,106,16,0.03); }}
+    .mtable tr:last-child td {{ border-bottom: none; }}
+    .ts-cell {{ color: var(--dim); white-space: nowrap; font-size: 12px; }}
+    .topic-txt {{ color: var(--hi); margin-bottom: 2px; }}
+    .sum-txt {{ color: var(--dim); font-size: 12px; line-height: 1.5; }}
+    .mission-tag {{
+      font-family: var(--head); font-size: 13px; font-weight: 600;
+      letter-spacing: 1px; color: var(--am);
+      text-transform: uppercase;
+    }}
+    .credit-txt {{ color: var(--ok); }}
+    .empty-cell {{
+      text-align: center; padding: 32px 20px !important;
+      color: var(--dim); letter-spacing: 3px; font-size: 13px;
+      font-family: var(--head); font-weight: 400;
+    }}
+    .dim-txt {{ color: var(--dim); }}
+
+    /* ── MISSIONS PANEL ── */
+    .mispanel {{ border-bottom: 1px solid var(--border); }}
+
+    /* ── FOOTER ── */
+    .footer {{
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 16px 40px; font-size: 12px; color: var(--dim);
+      letter-spacing: 1.5px; background: var(--bg2);
+      border-top: 1px solid var(--border);
+    }}
+    .footer-brand {{ color: #1e2e48; }}
+    .footer span {{ color: #283850; }}
   </style>
 </head>
 <body>
-  <h1>◈ COVAS SHIP AI — STATUS</h1>
-  <h2>System</h2>
-  <table>
-    <tr><td>Status</td><td class="ok">● ONLINE</td></tr>
-    <tr><td>Model</td><td>{OLLAMA_MODEL}</td></tr>
-    <tr><td>Temperature</td><td>{TEMPERATURE}</td></tr>
-    <tr><td>Uptime</td><td>{uptime_str}</td></tr>
-    <tr><td>Last Request</td><td>{last_req}</td></tr>
+
+<!-- HEADER -->
+<div class="hdr">
+  <div class="hdr-glow"></div>
+  <div class="logo">
+    <div class="logo-main">COVAS</div>
+    <div class="logo-slash">//</div>
+    <div class="logo-sub">System Status</div>
+  </div>
+  <div class="hdr-right">
+    <div>UNIT&#8209;01 &nbsp;&#9642;&nbsp; <em>{SERVER_HOST}:{SERVER_PORT}</em></div>
+    <div>APOLLO &nbsp;&#9642;&nbsp; <em>{MEMORY_SERVICE_URL}</em></div>
+    <div>UPDATED &nbsp;&#9642;&nbsp; <em>{now_str}</em></div>
+  </div>
+</div>
+
+<!-- STATUS BAR -->
+<div class="sbar">
+  <div class="spill">
+    <div class="dot ok pulse"></div>
+    <span class="ok">UNIT&#8209;01</span>
+    <span class="dim" style="font-weight:300">ONLINE</span>
+  </div>
+  <div class="spill">
+    <div class="dot {apollo_cls}{"" if not apollo_ok else " pulse"}"></div>
+    <span class="{apollo_cls}">APOLLO</span>
+    <span class="dim" style="font-weight:300">{apollo_lbl}</span>
+  </div>
+  <div class="spill right">&#8635;&nbsp; AUTO&#8209;REFRESH 10s</div>
+</div>
+
+<!-- BIG STATS -->
+<div class="bstats">
+  <div class="bstat">
+    <div class="bnum">{_stats["requests_total"]}</div>
+    <div class="blbl">Requests</div>
+    <div class="bsub">{_stats["requests_ok"]} ok &middot; <span class="{fail_cls}">{_stats["requests_failed"]} failed</span></div>
+  </div>
+  <div class="bstat">
+    <div class="bnum">{total_searches}</div>
+    <div class="blbl">Searches</div>
+    <div class="bsub">{_stats["searches_inara"]} inara &middot; {_stats["searches_general"]} general</div>
+  </div>
+  <div class="bstat">
+    <div class="bnum">{mem_total}</div>
+    <div class="blbl">Memories</div>
+    <div class="bsub">{mem_entities} entities &middot; {mem_db_sessions} sessions</div>
+  </div>
+  <div class="bstat">
+    <div class="bnum">{mem_active_missions}</div>
+    <div class="blbl">Active Missions</div>
+    <div class="bsub">{mem_db_missions} total logged</div>
+  </div>
+  <div class="bstat">
+    <div class="bnum" style="color:{err_color}">{mem_errors}</div>
+    <div class="blbl">Memory Errors</div>
+    <div class="bsub">processing faults</div>
+  </div>
+</div>
+
+<!-- MAIN LAYOUT -->
+<div class="layout">
+
+  <!-- LEFT COLUMN -->
+  <div class="lcol">
+    <div class="panel bracketed">
+      <div class="ptitle">UNIT&#8209;01 &mdash; Ship AI</div>
+      <table class="itable">
+        <tr><td>Model</td>        <td>{OLLAMA_MODEL}</td></tr>
+        <tr><td>Temperature</td>  <td>{TEMPERATURE}</td></tr>
+        <tr><td>Uptime</td>       <td>{uptime_str}</td></tr>
+        <tr><td>Last Request</td> <td>{last_req}</td></tr>
+        <tr><td>Cache</td>        <td>{cache_count} / {SEARCH_CACHE_SIZE}</td></tr>
+        <tr><td>History</td>      <td>{MAX_HISTORY_MESSAGES} messages</td></tr>
+        <tr><td>Lore Book</td>    <td class="{lore_cls}">{lore_txt}</td></tr>
+        <tr><td>Cmdr Profile</td> <td class="{profile_cls}">{profile_txt}</td></tr>
+      </table>
+    </div>
+
+    <div class="panel bracketed">
+      <div class="ptitle">Apollo &mdash; Memory Service</div>
+      <table class="itable">
+        <tr><td>Status</td>       <td class="{apollo_cls}">{apollo_lbl}</td></tr>
+        <tr><td>Last Ingest</td>  <td>{mem_last_ingest}</td></tr>
+        <tr><td>Session ID</td>   <td style="font-size:9px;word-break:break-all;color:var(--dim)">{mem_session}</td></tr>
+      </table>
+    </div>
+
+    <div class="panel">
+      <div class="ptitle">Memory by Category</div>
+      <div class="catlist">{cat_rows}</div>
+    </div>
+  </div>
+
+  <!-- RIGHT COLUMN: Recent Memories -->
+  <div>
+    <div class="panel" style="height:100%">
+      <div class="ptitle">Recent Memories</div>
+      <table class="mtable">
+        <thead>
+          <tr>
+            <th style="width:110px">Timestamp</th>
+            <th style="width:120px">Category</th>
+            <th>Topic &amp; Summary</th>
+          </tr>
+        </thead>
+        <tbody>{mem_rows}</tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- MISSIONS -->
+<div class="mispanel">
+  <div class="ptitle">Active Elite Dangerous Missions</div>
+  <table class="mtable">
+    <thead>
+      <tr><th>Type</th><th>Giver</th><th>Origin</th><th>Destination</th><th>Reward</th></tr>
+    </thead>
+    <tbody>{mission_rows}</tbody>
   </table>
-  <h2>Requests</h2>
-  <table>
-    <tr><td>Total</td><td>{_stats['requests_total']}</td></tr>
-    <tr><td>Successful</td><td class="ok">{_stats['requests_ok']}</td></tr>
-    <tr><td>Failed</td><td class="{'err' if _stats['requests_failed'] > 0 else 'ok'}">{_stats['requests_failed']}</td></tr>
-    <tr><td>INARA Searches</td><td>{_stats['searches_inara']}</td></tr>
-    <tr><td>General Searches</td><td>{_stats['searches_general']}</td></tr>
-    <tr><td>Cache Entries</td><td>{cache_count} / {SEARCH_CACHE_SIZE}</td></tr>
-  </table>
-  <h2>Data</h2>
-  <table>
-    <tr><td>Lore Book</td><td class="{'ok' if LORE_SECTIONS else 'warn'}">{lore_status}</td></tr>
-    <tr><td>Commander Profile</td><td class="{'ok' if COMMANDER_PROFILE else 'warn'}">{profile_status}</td></tr>
-    <tr><td>Max History</td><td>{MAX_HISTORY_MESSAGES} messages</td></tr>
-    <tr><td>Session Log</td><td>{os.path.basename(LOG_FILE)}</td></tr>
-  </table>
-  <h2>Apollo Memory Service</h2>
-  <table>
-    <tr><td>Connection</td><td class="{mem_cls}">{mem_status_txt}</td></tr>
-    <tr><td>Current Session</td><td style="font-size:10px">{memory_session}</td></tr>
-    <tr><td>Total Memories</td><td>{mem_total}</td></tr>
-    <tr><td>Sessions Stored</td><td>{mem_sessions}</td></tr>
-    <tr><td>Active ED Missions</td><td>{mem_missions}</td></tr>
-    <tr><td>Last Ingest</td><td>{mem_last}</td></tr>
-    <tr><td>Processing Errors</td><td class="{'err' if mem_errors not in ('—', 0, '0') else 'ok'}">{mem_errors}</td></tr>
-    <tr><td>Full Memory Dashboard</td><td><a href="{MEMORY_SERVICE_URL}" target="_blank">{MEMORY_SERVICE_URL}</a></td></tr>
-  </table>
-  <p class="footer">Page auto-refreshes every 10 seconds. Server: http://{SERVER_HOST}:{SERVER_PORT}</p>
+</div>
+
+<!-- FOOTER -->
+<div class="footer">
+  <div class="footer-brand">COVAS LOCAL AI BRIDGE</div>
+  <div><span>MODEL:</span> {OLLAMA_MODEL} &nbsp;&#9642;&nbsp; <span>TEMP:</span> {TEMPERATURE} &nbsp;&#9642;&nbsp; <span>PORT:</span> {SERVER_PORT}</div>
+  <div><span>APOLLO:</span> {MEMORY_SERVICE_URL}</div>
+</div>
+
 </body>
 </html>"""
     return HTMLResponse(content=html)
+
+
 
 @app.get("/v1/models")
 def list_models():
