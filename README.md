@@ -1,0 +1,1 @@
+Ongoing project for Integrating Locally hosted LLM with COVAS:NEXT Server for use with Elite Dangerous.
