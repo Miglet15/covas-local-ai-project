@@ -32,44 +32,9 @@ def log_exchange(role: str, content: str):
                 f.write(content + "\n")
         except Exception:
             pass
-
-def rotate_session_log(max_sessions: int = 5):
-    """
-    Trim covas_session.log so it never holds more than *max_sessions* past
-    sessions.  The current (new) session is not counted — it hasn't been
-    written yet when this is called.  If the file doesn't exist or has fewer
-    sessions than the limit, nothing changes.
-    """
-    if not os.path.exists(LOG_FILE):
-        return
-    try:
-        with open(LOG_FILE, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        # Split on the SESSION START banner (the line of '=' chars that
-        # immediately precedes it acts as the real boundary).
-        SESSION_MARKER = "=" * 60 + "\n"
-        parts = content.split(SESSION_MARKER)
-        # parts[0]  → any content before the very first banner (may be empty)
-        # parts[1+] → "SESSION START…\n…\n" + log lines until next banner
-        # Reconstruct sessions: each session is SESSION_MARKER + its content
-        sessions = []
-        i = 1                        # skip parts[0] (pre-first-session noise)
-        while i < len(parts):
-            sessions.append(SESSION_MARKER + parts[i])
-            i += 1
-
-        if len(sessions) <= max_sessions:
-            return                   # nothing to prune
-
-        kept   = sessions[-max_sessions:]
-        pruned = len(sessions) - max_sessions
-        with open(LOG_FILE, "w", encoding="utf-8") as f:
-            f.write("".join(kept))
-
-        print(f"  [Log] Pruned {pruned} old session(s) — keeping last {max_sessions}.")
-    except Exception as e:
-        print(f"  [Log] WARN: Could not rotate session log: {e}")
+    # Feed exchange into memory buffer (non-blocking — _memory handles threading)
+    if _memory is not None and content.strip():
+        _memory.append(f"[{datetime.now().strftime('%H:%M:%S')}] {role.upper()}: {content}")
 
 def pause_and_exit(code=1):
     print("\n" + "="*60)
@@ -100,6 +65,7 @@ REQUIRED = {
     "langchain_ollama":  "langchain-ollama",
     "langchain_core":    "langchain-core",
     "ddgs":              "ddgs",
+    "requests":          "requests",
 }
 
 missing = []
@@ -129,6 +95,7 @@ except Exception as e:
     print(f"\n[ERROR] Import failed:\n  {e}")
     pause_and_exit(1)
 
+
 # ── Load Config ───────────────────────────────────────────────────────────────
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
@@ -142,14 +109,9 @@ DEFAULT_CONFIG = {
     "max_history_messages":  10,
     "request_timeout_sec":   120,
     "search_cache_size":     50,
-    "history_gap_minutes":   8,
-    "memory_enabled":        True,
-    "memory_max_entries":    120,
-    "memory_min_keywords":   2,
-    "log_max_sessions":      5,
-    "max_tool_iterations":   5,
-    "max_search_results":    5,
-    "max_memories_recalled": 5
+    "memory_service_url":    "http://192.168.1.65:8100",
+    "memory_interval_sec":   300,
+    "memory_enabled":        True
 }
 
 if os.path.exists(CONFIG_FILE):
@@ -178,14 +140,30 @@ TEMPERATURE          = float(config["temperature"])
 MAX_HISTORY_MESSAGES = int(config["max_history_messages"])
 REQUEST_TIMEOUT      = int(config["request_timeout_sec"])
 SEARCH_CACHE_SIZE    = int(config["search_cache_size"])
-HISTORY_GAP_SECONDS  = int(config.get("history_gap_minutes", 8)) * 60
-MEMORY_ENABLED       = bool(config.get("memory_enabled", True))
-MEMORY_MAX_ENTRIES   = int(config.get("memory_max_entries", 120))
-MEMORY_MIN_KEYWORDS  = int(config.get("memory_min_keywords", 2))
-LOG_MAX_SESSIONS     = int(config.get("log_max_sessions", 5))
-MAX_TOOL_ITERATIONS  = int(config.get("max_tool_iterations", 5))
-MAX_SEARCH_RESULTS   = int(config.get("max_search_results", 5))
-MAX_MEMORIES_RECALLED = int(config.get("max_memories_recalled", 5))
+MEMORY_SERVICE_URL   = config["memory_service_url"]
+MEMORY_INTERVAL_SEC  = int(config["memory_interval_sec"])
+MEMORY_ENABLED       = bool(config["memory_enabled"])
+# ── Memory Client (optional — graceful fallback if not present) ───────────────
+_memory = None
+if MEMORY_ENABLED:
+    try:
+        import importlib.util, sys as _sys
+        _spec = importlib.util.spec_from_file_location(
+            "covas_memory_client",
+            os.path.join(SCRIPT_DIR, "covas_memory_client.py")
+        )
+        _mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _MemoryClient = _mod.MemoryClient
+        _memory = _MemoryClient(
+            service_url=MEMORY_SERVICE_URL,
+            interval=MEMORY_INTERVAL_SEC
+        )
+        log(f"Memory client initialised → {MEMORY_SERVICE_URL}")
+    except FileNotFoundError:
+        log("WARN: covas_memory_client.py not found — memory system disabled.")
+    except Exception as _e:
+        log(f"WARN: Memory client failed to load ({_e}) — memory system disabled.")
 
 # ── Load Lore Book ────────────────────────────────────────────────────────────
 LORE_FILE     = os.path.join(SCRIPT_DIR, "elite_lore.md")
@@ -220,161 +198,6 @@ if os.path.exists(PROFILE_FILE):
         log(f"WARN: Could not load commander profile: {e}")
 else:
     log(f"WARN: No commander profile found — place commander_profile.md next to this script.")
-
-# ── Live Ship State (parsed from COVAS:NEXT status blocks) ──────────────────
-# COVAS:NEXT injects the current ship/mission/location state as a system
-# message in every API call. We parse it out and cache it here so the
-# system prompt always reflects live game data without reading a static file.
-
-_live_ship_state: dict = {}   # latest parsed state
-_ship_state_lock = threading.Lock()
-
-# ── Mission Name Translation ──────────────────────────────────────────────────
-# Maps internal COVAS:NEXT mission-type strings → human-readable labels.
-# The Mission_ prefix is stripped before matching. Matching is case-insensitive
-# and falls back to a cleaned version of the raw token if nothing matches.
-_MISSION_TYPE_MAP = {
-    # Massacre / kill missions
-    "massacre":                     "Massacre",
-    "massacrewing":                 "Wing Massacre",
-    "massacrethargoid":             "Thargoid Massacre",
-    # Assassination
-    "assassinate":                  "Assassination",
-    "assassinate_planetary_expansion": "Assassination: Counter Expansion",
-    "assassinate_expansion":        "Assassination: Counter Expansion",
-    "assassinate_planetary":        "Assassination: Planetary Target",
-    # Courier / delivery
-    "courier":                      "Courier",
-    "courierwing":                  "Wing Courier",
-    "delivery":                     "Delivery",
-    "deliverywing":                 "Wing Delivery",
-    # Cargo / hauling
-    "cargo":                        "Cargo Hauling",
-    "cargolong":                    "Long-Haul Cargo",
-    "altruism":                     "Altruism (Donation)",
-    # Mining
-    "mining":                       "Mining",
-    "miningwing":                   "Wing Mining",
-    # Salvage / rescue
-    "salvage":                      "Salvage",
-    "rescue":                       "Rescue",
-    # Passengers
-    "passenger":                    "Passenger Transport",
-    "passengervip":                 "VIP Passenger Transport",
-    "passengerevacuation":          "Passenger Evacuation",
-    # Bounty / combat
-    "collect":                      "Bounty Collection",
-    "scan":                         "Scan Target",
-    "hack":                         "Hack Data Point",
-    # Expansion / powerplay
-    "expansion":                    "Expansion Support",
-    "retreat":                      "Retreat Support",
-    "invest":                       "Investment",
-}
-
-def _translate_mission_name(raw: str) -> str:
-    """
-    Convert an internal mission type string like 'Mission_MassacreWing' or
-    'Mission_Assassinate_Planetary_Expansion' into a human-readable label.
-    """
-    # Strip leading 'Mission_' (case-insensitive)
-    cleaned = re.sub(r"^Mission_", "", raw, flags=re.IGNORECASE).strip()
-    key = cleaned.lower().replace(" ", "_")
-    if key in _MISSION_TYPE_MAP:
-        return _MISSION_TYPE_MAP[key]
-    # Try progressively shorter prefix matches (longest first)
-    parts = key.split("_")
-    for length in range(len(parts), 0, -1):
-        prefix = "_".join(parts[:length])
-        if prefix in _MISSION_TYPE_MAP:
-            rest = " ".join(p.capitalize() for p in parts[length:])
-            base = _MISSION_TYPE_MAP[prefix]
-            return (base + ": " + rest).rstrip(": ")
-    # Fallback: convert underscores to spaces and title-case
-    return cleaned.replace("_", " ").title()
-
-# Regex to find Mission_Xxxx tokens anywhere in a message
-_MISSION_TOKEN_RE = re.compile(r"Mission_[A-Za-z_]+", re.IGNORECASE)
-
-def translate_mission_names_in_text(text: str) -> str:
-    """Replace all Mission_Xxxx tokens in a text block with readable names."""
-    def _replace(m):
-        return _translate_mission_name(m.group(0))
-    return _MISSION_TOKEN_RE.sub(_replace, text)
-
-def parse_live_ship_state(messages) -> dict:
-    """
-    Scan all system messages sent by COVAS:NEXT and extract live ship state.
-    Returns a dict with keys: ship_type, ship_name, location, station, missions, etc.
-    Updates _live_ship_state in place and returns the current value.
-    """
-    global _live_ship_state
-    state = {}
-
-    for msg in messages:
-        role    = getattr(msg, "role", None) or (msg.get("role") if isinstance(msg, dict) else None)
-        content = getattr(msg, "content", None) or (msg.get("content") if isinstance(msg, dict) else None)
-        if not content or role not in ("system", None):
-            continue
-        text = str(content)
-
-        # Ship type and name — COVAS:NEXT uses patterns like:
-        # "Current ship: Cobra MkIII (The Debt Collector)"
-        # "You are flying a Kestrel Mark 2"
-        m = re.search(
-            r"(?:current ship|flying(?:\s+a)?|ship(?:\s+name)?)\s*[:\-]?\s*"
-            r"([A-Za-z0-9\s\.]+?)\s*(?:\(([^)]+)\))?(?:\n|$|,|\.|;)",
-            text, re.IGNORECASE
-        )
-        if m:
-            state["ship_type"] = m.group(1).strip()
-            if m.group(2):
-                state["ship_name"] = m.group(2).strip()
-
-        # Location / system
-        m = re.search(
-            r"(?:location|current(?:ly)? (?:in|at)|system)\s*[:\-]?\s*([A-Za-z0-9\s\.\-']+?)(?:\n|$|,|\.|;)",
-            text, re.IGNORECASE
-        )
-        if m:
-            state["location"] = m.group(1).strip()
-
-        # Station / dock
-        m = re.search(
-            r"(?:docked(?:\s+at)?|station|port|outpost)\s*[:\-]?\s*([A-Za-z0-9\s\.\-']+?)(?:\n|$|,|\.|;)",
-            text, re.IGNORECASE
-        )
-        if m:
-            state["station"] = m.group(1).strip()
-
-        # Active missions — grab all Mission_Xxxx tokens and translate
-        mission_tokens = _MISSION_TOKEN_RE.findall(text)
-        if mission_tokens:
-            state["missions"] = [_translate_mission_name(t) for t in mission_tokens]
-
-    # Merge with any previously cached state, new values take precedence
-    with _ship_state_lock:
-        _live_ship_state.update({k: v for k, v in state.items() if v})
-        return dict(_live_ship_state)
-
-def build_live_ship_context(state: dict) -> str:
-    """Format the parsed live ship state into a short context block."""
-    if not state:
-        return ""
-    lines = []
-    if state.get("ship_type"):
-        line = "Current ship: " + state["ship_type"]
-        if state.get("ship_name"):
-            line += " (" + state["ship_name"] + ")"
-        lines.append(line)
-    if state.get("location"):
-        lines.append("Current system: " + state["location"])
-    if state.get("station"):
-        lines.append("Docked at: " + state["station"])
-    if state.get("missions"):
-        lines.append("Active missions: " + ", ".join(state["missions"]))
-    return "\n".join(lines)
-
 
 # ── Lore Keyword Map ──────────────────────────────────────────────────────────
 KEYWORD_MAP = {
@@ -537,37 +360,15 @@ Never reference the internet, web searches, or external tools by name.
 You have deep knowledge of Elite Dangerous: ships, modules, engineering, combat, exploration,
 trading, factions, lore, and mechanics. Use that knowledge directly — always."""
 
-def build_system_prompt(user_message: str, live_state: dict = None) -> str:
+def build_system_prompt(user_message: str) -> str:
     parts = [BASE_SYSTEM_PROMPT]
 
-    # ── Live ship state (from COVAS:NEXT, overrides static profile for ship fields) ──
-    ship_ctx = build_live_ship_context(live_state or _live_ship_state)
-    if ship_ctx:
-        parts.append(
-            "\n\n══════════════════════════════════════════\n"
-            "LIVE SHIP STATUS (current as of this request)\n"
-            "══════════════════════════════════════════\n"
-            + ship_ctx
-            + "\n══════════════════════════════════════════"
-        )
-    elif COMMANDER_PROFILE:
-        # Fall back to static profile if no live data has arrived yet
+    if COMMANDER_PROFILE:
         parts.append(
             "\n\n══════════════════════════════════════════\n"
             "COMMANDER PROFILE\n"
             "══════════════════════════════════════════\n"
             + COMMANDER_PROFILE
-            + "\n══════════════════════════════════════════"
-        )
-
-    memories = get_relevant_memories(user_message)
-    if memories:
-        parts.append(
-            "\n\n══════════════════════════════════════════\n"
-            "RELEVANT PAST MISSION MEMORY\n"
-            "Use these recalled facts naturally if relevant. Do not recite them verbatim.\n"
-            "══════════════════════════════════════════\n"
-            + memories
             + "\n══════════════════════════════════════════"
         )
 
@@ -651,7 +452,7 @@ def _search_inara(query: str) -> str:
     """Search INARA directly using site-restricted DDG query."""
     try:
         inara_query = f"site:inara.cz {query}"
-        results = _ddgs_search(inara_query, max_results=MAX_SEARCH_RESULTS)
+        results = _ddgs_search(inara_query, max_results=5)
         if results:
             log(f"INARA search returned {len(results)} result(s).")
             _stats["searches_inara"] += 1
@@ -664,7 +465,7 @@ def _search_inara(query: str) -> str:
 def _search_general(query: str) -> str:
     """Fallback general web search."""
     try:
-        results = _ddgs_search(query, max_results=MAX_SEARCH_RESULTS)
+        results = _ddgs_search(query, max_results=4)
         if results:
             log(f"General search returned {len(results)} result(s).")
             _stats["searches_general"] += 1
@@ -742,85 +543,28 @@ try:
     llm_with_tools    = llm.bind_tools(TOOLS)
     llm_without_tools = llm
     log("Model ready.")
-    log("Model ready.")
 except Exception as e:
     print(f"\n[ERROR] Failed to initialize model:\n  {e}")
     pause_and_exit(1)
 
 # ── Raw JSON Tool Call Detection ──────────────────────────────────────────────
-# Note: we use a brace-counting extractor rather than a flat regex so that
-# nested objects like {"name":"web_search","parameters":{"query":"..."}}
-# are correctly detected and stripped even when the query value contains {}.
-
-def _extract_json_objects(text: str) -> list:
-    """
-    Walk the string character-by-character and return every top-level JSON
-    object (i.e. balanced {...} blocks) found in the text.
-    Handles nested braces and string escapes correctly.
-    """
-    objects = []
-    depth   = 0
-    start   = -1
-    in_str  = False
-    esc     = False
-    for i, ch in enumerate(text):
-        if esc:
-            esc = False
-            continue
-        if in_str:
-            if ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-        elif ch == '{':
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == '}':
-            depth -= 1
-            if depth == 0 and start != -1:
-                objects.append((start, i + 1, text[start:i + 1]))
-                start = -1
-    return objects   # list of (start_idx, end_idx, json_str)
-
+_JSON_TOOL_RE = re.compile(r'\{[^{}]*"name"\s*:\s*"([^"]+)"[^{}]*\}', re.DOTALL)
 
 def find_raw_tool_call(content: str) -> dict | None:
-    """
-    Scan the response text for any JSON object that looks like a tool call.
-    Returns a normalised dict or None.
-    """
-    for _start, _end, obj_str in _extract_json_objects(content):
+    for match in _JSON_TOOL_RE.finditer(content):
         try:
-            data = json.loads(obj_str)
-        except (json.JSONDecodeError, ValueError):
+            data   = json.loads(match.group(0))
+            name   = data.get("name") or data.get("function")
+            params = data.get("parameters") or data.get("args") or data.get("arguments") or {}
+            if name and isinstance(params, dict):
+                return {"name": name, "args": params, "id": "fallback-tool-call", "raw_match": match.group(0)}
+        except (json.JSONDecodeError, AttributeError):
             continue
-        name   = data.get("name") or data.get("function")
-        params = (data.get("parameters") or data.get("args")
-                  or data.get("arguments") or {})
-        if name and isinstance(params, dict):
-            return {"name": name, "args": params,
-                    "id": "fallback-tool-call", "raw_match": obj_str}
     return None
 
-
 def strip_json_tool_calls(content: str) -> str:
-    """
-    Remove all JSON tool-call objects from a response string.
-    Also strips fenced ```json ... ``` blocks.
-    """
-    # Remove fenced code blocks first
     content = re.sub(r"```(?:json)?\s*\{.*?\}\s*```", "", content, flags=re.DOTALL)
-    # Remove every top-level JSON object that looks like a tool call
-    for start, end, obj_str in reversed(_extract_json_objects(content)):
-        try:
-            data = json.loads(obj_str)
-            if data.get("name") or data.get("function"):
-                content = content[:start] + content[end:]
-        except (json.JSONDecodeError, ValueError):
-            continue
+    content = _JSON_TOOL_RE.sub("", content)
     return content.strip()
 
 # ── Conversation History Truncation ──────────────────────────────────────────
@@ -849,7 +593,7 @@ def check_ollama_alive() -> bool:
         return False
 
 # ── Tool Execution Loop ───────────────────────────────────────────────────────
-def run_with_tools(messages: list, use_tools: bool = True, max_iterations: int = MAX_TOOL_ITERATIONS) -> str:
+def run_with_tools(messages: list, use_tools: bool = True, max_iterations: int = 5) -> str:
     active_llm = llm_with_tools if use_tools else llm_without_tools
     messages   = truncate_history(messages)
 
@@ -991,174 +735,6 @@ async def stream_response(text: str):
     yield make_stream_chunk("", finish=True)
     yield "data: [DONE]\n\n"
 
-# ── Time-Gap Amnesia ─────────────────────────────────────────────────────────
-# Tracks when the last request was processed. If the incoming request arrives
-# more than HISTORY_GAP_SECONDS after the last one, the conversation history
-# sent by COVAS:NEXT is trimmed to just the current message so stale context
-# (like a system name from a session hours ago) can't pollute the response.
-
-_last_request_time: float = 0.0   # unix timestamp, updated after each request
-
-def apply_time_gap_amnesia(messages: list, current_time: float) -> tuple:
-    """
-    Returns (pruned_messages, gap_detected).
-    If the gap since the last request exceeds the threshold, only the current
-    user message (plus the system prompt) is kept.
-    """
-    global _last_request_time
-    gap = current_time - _last_request_time if _last_request_time > 0 else 0
-    if gap > HISTORY_GAP_SECONDS and _last_request_time > 0:
-        gap_min = int(gap // 60)
-        log(f"Time gap detected: {gap_min}m since last message — history cleared.")
-        # Keep only SystemMessages and the final user message
-        system_msgs = [m for m in messages if isinstance(m, SystemMessage)]
-        user_msgs   = [m for m in messages if isinstance(m, HumanMessage)]
-        last_user   = [user_msgs[-1]] if user_msgs else []
-        return system_msgs + last_user, True
-    return messages, False
-
-
-# ── Long-Term Memory Store ────────────────────────────────────────────────────
-# After each real exchange, a background thread summarises it and stores a
-# compact memory segment. On new requests, relevant memories are retrieved by
-# keyword match and injected into the system prompt.
-
-MEMORY_FILE = os.path.join(SCRIPT_DIR, "covas_memories.json")
-
-_memory_lock = threading.Lock()
-_memories: list = []   # list of dicts: {timestamp, summary, keywords}
-
-# Common English stop-words and Elite noise words to ignore during keyword extraction
-_STOP_WORDS = {
-    "a","an","the","and","or","but","in","on","at","to","for","of","with",
-    "is","was","are","were","be","been","being","have","has","had","do",
-    "does","did","will","would","could","should","may","might","shall",
-    "i","you","we","he","she","it","they","me","him","her","us","them",
-    "my","your","our","his","its","their","this","that","these","those",
-    "what","which","who","how","when","where","why","yes","no","not","so",
-    "just","also","then","than","more","some","any","all","if","as","up",
-    "out","now","can","get","got","let","ok","okay","yeah","there","here",
-    # game event noise
-    "game","event","important","mike","commander","covas","ship","less",
-    "than","minute","ago","frame","shift","drive","supercruise","system",
-    "performed","scan","message","received","channel","npc","pilot","has",
-    "entered","dropped","from","near","station","outpost","fleet","carrier",
-    "currently","docked","undocked","legal","state","now","weapons","target",
-    "lock","lost","charging","preparing","jump","cleared","navigation","route",
-    "shields","online","offline","combat","danger","detected","scanners",
-    "resurrected","purchased","ammunition","credits","redeemed","bounty",
-    "voucher","repaired","damage","stabilizer","engaged","drift","ending",
-}
-
-def _extract_keywords(text: str) -> list:
-    words = re.findall(r"[a-zA-Z][a-zA-Z0-9_'-]{2,}", text.lower())
-    seen, result = set(), []
-    for w in words:
-        if w not in _STOP_WORDS and w not in seen:
-            seen.add(w)
-            result.append(w)
-    return result
-
-def _load_memories():
-    global _memories
-    if not os.path.exists(MEMORY_FILE):
-        return
-    try:
-        with open(MEMORY_FILE, "r", encoding="utf-8") as f:
-            _memories = json.load(f)
-        log(f"Long-term memory loaded: {len(_memories)} segment(s).")
-    except Exception as e:
-        log(f"WARN: Could not load memories: {e}")
-        _memories = []
-
-def _save_memories():
-    try:
-        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(_memories, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        log(f"WARN: Could not save memories: {e}")
-
-def _add_memory(summary: str, keywords: list, timestamp: str):
-    with _memory_lock:
-        _memories.append({
-            "timestamp": timestamp,
-            "summary":   summary,
-            "keywords":  keywords,
-        })
-        # Trim to max — drop oldest
-        if len(_memories) > MEMORY_MAX_ENTRIES:
-            del _memories[:len(_memories) - MEMORY_MAX_ENTRIES]
-        _save_memories()
-    log(f"Memory stored ({len(_memories)} total): {summary[:80]}")
-
-def summarise_exchange_background(user_msg: str, covas_response: str, timestamp: str):
-    """
-    Runs in a background thread after a response is sent.
-    Asks the model to produce a single-sentence memory of the exchange,
-    then extracts keywords and stores it.
-    """
-    if not MEMORY_ENABLED:
-        return
-    # Skip very short or purely conversational exchanges
-    if len(covas_response.strip()) < 30:
-        return
-
-    prompt = (
-        "Summarise the following exchange between a Commander and their ship AI "
-        "in ONE concise sentence (max 25 words). Focus on facts: locations, ships, "
-        "missions, targets, events. Omit filler. Output only the summary sentence, nothing else.\n\n"
-        f"Commander: {user_msg.strip()}\n"
-        f"COVAS: {covas_response.strip()}"
-    )
-    try:
-        result = llm_without_tools.invoke([HumanMessage(content=prompt)])
-        summary = result.content.strip().strip('"').strip("'")
-        if not summary or len(summary) < 10:
-            return
-        # Combine keywords from user message, response, and summary
-        keywords = _extract_keywords(user_msg + " " + covas_response + " " + summary)
-        if len(keywords) < MEMORY_MIN_KEYWORDS:
-            return
-        _add_memory(summary, keywords[:30], timestamp)
-    except Exception as e:
-        log(f"Memory summarisation error: {e}")
-
-def get_relevant_memories(user_msg: str, max_memories: int = MAX_MEMORIES_RECALLED) -> str:
-    """
-    Returns a block of relevant past memories to inject into the system prompt.
-    Matches by keyword overlap between the incoming message and stored memories.
-    """
-    if not MEMORY_ENABLED or not _memories:
-        return ""
-
-    msg_keywords = set(_extract_keywords(user_msg))
-    if not msg_keywords:
-        return ""
-
-    scored = []
-    with _memory_lock:
-        for mem in _memories:
-            mem_kw = set(mem.get("keywords", []))
-            overlap = len(msg_keywords & mem_kw)
-            if overlap >= MEMORY_MIN_KEYWORDS:
-                scored.append((overlap, mem))
-
-    if not scored:
-        return ""
-
-    # Sort by score desc, then recency (later index = more recent)
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top = scored[:max_memories]
-
-    lines = [m["summary"] for _, m in top]
-    block = "\n".join(f"- {l}" for l in lines)
-    log(f"Memory recalled: {len(top)} segment(s) matched.")
-    return block
-
-
-
-_load_memories()
-
 # ── Server Stats (for status page) ───────────────────────────────────────────
 _stats = {
     "start_time":       datetime.now(),
@@ -1193,6 +769,28 @@ def status_page():
     profile_status = f"{len(COMMANDER_PROFILE):,} chars" if COMMANDER_PROFILE else "Not loaded"
     cache_count = len(_search_cache)
     last_req = _stats["last_request"].strftime("%H:%M:%S") if _stats["last_request"] else "None"
+    memory_session = _memory.session_id if _memory is not None else "—"
+
+    # Ping Apollo memory service for live stats
+    mem_online = False
+    mem_total  = mem_sessions = mem_missions = mem_last = mem_errors = "—"
+    if _memory is not None:
+        try:
+            import requests as _req
+            _r = _req.get(f"{MEMORY_SERVICE_URL}/stats", timeout=2)
+            if _r.status_code == 200:
+                _ms = _r.json()
+                mem_online   = True
+                mem_total    = _ms.get("total_memories", "—")
+                mem_sessions = _ms.get("total_sessions", "—")
+                mem_missions = _ms.get("active_missions", "—")
+                mem_last     = _ms.get("last_ingest") or "None"
+                mem_errors   = _ms.get("errors", "—")
+        except Exception:
+            pass
+    mem_status_txt = (f"● Online → {MEMORY_SERVICE_URL}" if mem_online
+                      else ("● Unreachable" if _memory is not None else "Disabled"))
+    mem_cls = "ok" if mem_online else ("err" if _memory is not None else "warn")
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -1208,6 +806,7 @@ def status_page():
     td:first-child {{ color: #888; width: 200px; }}
     .ok {{ color: #44ff88; }} .warn {{ color: #ffaa00; }} .err {{ color: #ff4444; }}
     .footer {{ color: #444; font-size: 11px; margin-top: 30px; }}
+    a {{ color: #cc8800; }}
   </style>
 </head>
 <body>
@@ -1235,8 +834,17 @@ def status_page():
     <tr><td>Commander Profile</td><td class="{'ok' if COMMANDER_PROFILE else 'warn'}">{profile_status}</td></tr>
     <tr><td>Max History</td><td>{MAX_HISTORY_MESSAGES} messages</td></tr>
     <tr><td>Session Log</td><td>{os.path.basename(LOG_FILE)}</td></tr>
-    <tr><td>Long-Term Memory</td><td>{len(_memories)} segment(s)</td></tr>
-    <tr><td>Gap Amnesia</td><td>{int(HISTORY_GAP_SECONDS // 60)}m threshold</td></tr>
+  </table>
+  <h2>Apollo Memory Service</h2>
+  <table>
+    <tr><td>Connection</td><td class="{mem_cls}">{mem_status_txt}</td></tr>
+    <tr><td>Current Session</td><td style="font-size:10px">{memory_session}</td></tr>
+    <tr><td>Total Memories</td><td>{mem_total}</td></tr>
+    <tr><td>Sessions Stored</td><td>{mem_sessions}</td></tr>
+    <tr><td>Active ED Missions</td><td>{mem_missions}</td></tr>
+    <tr><td>Last Ingest</td><td>{mem_last}</td></tr>
+    <tr><td>Processing Errors</td><td class="{'err' if mem_errors not in ('—', 0, '0') else 'ok'}">{mem_errors}</td></tr>
+    <tr><td>Full Memory Dashboard</td><td><a href="{MEMORY_SERVICE_URL}" target="_blank">{MEMORY_SERVICE_URL}</a></td></tr>
   </table>
   <p class="footer">Page auto-refreshes every 10 seconds. Server: http://{SERVER_HOST}:{SERVER_PORT}</p>
 </body>
@@ -1256,8 +864,6 @@ async def chat_completions(req: ChatRequest):
     log(f"── Incoming: \"{user_msg[:80]}{'...' if len(user_msg) > 80 else ''}\"")
     log_exchange("Commander", user_msg)
     t_total = time.time()
-    now_ts    = t_total
-    now_label = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     conversational = is_conversational(user_msg)
     game_event     = is_game_event(user_msg)
@@ -1287,12 +893,7 @@ async def chat_completions(req: ChatRequest):
         }
 
     try:
-        # Parse live ship/mission state from the messages COVAS:NEXT sent us
-        live_state = parse_live_ship_state(req.messages)
-        if live_state:
-            log(f"Live ship state: {', '.join(f'{k}={v}' for k,v in live_state.items() if k != 'missions')}")
-
-        system_content = build_system_prompt(user_msg, live_state)
+        system_content = build_system_prompt(user_msg)
 
         # For game events, add an explicit instruction to be brief and not search
         if game_event:
@@ -1312,9 +913,6 @@ async def chat_completions(req: ChatRequest):
             elif msg.role == "assistant":
                 lc_messages.append(AIMessage(content=msg.content))
 
-        # Apply time-gap amnesia — drop stale history if gap exceeded
-        lc_messages, gap_hit = apply_time_gap_amnesia(lc_messages, now_ts)
-
         response_text = run_with_tools(lc_messages, use_tools=not disable_tools)
         _stats["requests_ok"] += 1
 
@@ -1323,24 +921,8 @@ async def chat_completions(req: ChatRequest):
         log(f"ERROR: {e}")
         _stats["requests_failed"] += 1
 
-    # Translate any Mission_Xxxx tokens that leaked into the response text
-    response_text = translate_mission_names_in_text(response_text)
-
     log_exchange("COVAS", response_text)
     log(f"── Done in {time.time() - t_total:.1f}s total\n")
-
-    # Update the last request timestamp for gap detection
-    global _last_request_time
-    _last_request_time = now_ts
-
-    # Fire memory summarisation in the background (non-blocking)
-    if response_text and not conversational and not game_event and not silent_event:
-        threading.Thread(
-            target=summarise_exchange_background,
-            args=(user_msg, response_text, now_label),
-            name="COVAS-Memory",
-            daemon=True,
-        ).start()
 
     # Stream if COVAS:NEXT requests it
     if req.stream:
@@ -1372,13 +954,9 @@ if __name__ == "__main__":
     print(f"  Log file : {LOG_FILE}")
     print(f"  Server   : http://localhost:{SERVER_PORT}")
     print(f"  Status   : http://localhost:{SERVER_PORT}/")
-    print(f"  Memory   : {len(_memories)} segments loaded  |  gap={int(HISTORY_GAP_SECONDS//60)}m")
     print(f"  COVAS endpoint: http://localhost:{SERVER_PORT}/v1")
     print(f"{'='*60}\n")
     print("  Press CTRL+C to stop.\n")
-
-    # Prune old sessions before starting a new one
-    rotate_session_log(max_sessions=LOG_MAX_SESSIONS)
 
     # Write a session start marker to the log
     with open(LOG_FILE, "a", encoding="utf-8") as f:
@@ -1387,10 +965,18 @@ if __name__ == "__main__":
         f.write(f"Model: {OLLAMA_MODEL} | Temp: {TEMPERATURE}\n")
         f.write(f"{'='*60}\n")
 
+    # Start memory session
+    if _memory is not None:
+        _memory.new_session()
+        log(f"Memory session started (interval={MEMORY_INTERVAL_SEC}s, endpoint={MEMORY_SERVICE_URL})")
+
     try:
         uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT)
     except KeyboardInterrupt:
         print("\n[*] Stopped by user.")
+        if _memory is not None:
+            log("Flushing memory session to Apollo...")
+            _memory.send_session_end()
         sys.exit(0)
     except Exception as e:
         print(f"\n[ERROR] Server crashed:\n  {e}")
