@@ -109,19 +109,44 @@ os.makedirs(THEMES_DIR, exist_ok=True)
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config", "config.json")
 
 DEFAULT_CONFIG = {
+    # ── Ollama / Model ────────────────────────────────────────────────────
     "ollama_base_url":       "http://localhost:11434",
     "ollama_model":          "llama3.1:8b",
+    "temperature":           0.7,
+
+    # ── Server ────────────────────────────────────────────────────────────
     "server_host":           "0.0.0.0",
     "server_port":           8080,
-    "temperature":           0.7,
+
+    # ── Conversation history ──────────────────────────────────────────────
     "max_history_messages":  10,
+    "_comment_history":      "Minutes of inactivity before conversation history is cleared on the next request",
+    "history_gap_minutes":   8,
+
+    # ── Request handling ──────────────────────────────────────────────────
     "request_timeout_sec":   120,
+    "_comment_tools":        "Max tool-call rounds per request before returning what the model has so far",
+    "max_tool_iterations":   5,
+
+    # ── Search ────────────────────────────────────────────────────────────
     "search_cache_size":     50,
+    "_comment_search":       "Number of results fetched per web search (applies to both INARA and general searches)",
     "max_search_results":    5,
-    "log_max_sessions":      5,
-    "memory_service_url":    "http://192.168.1.65:8100",
+    "_comment_inara":        "Optional INARA API key from https://inara.cz/elite/cmdr-settings-api/ — reserved for future use",
+    "inara_api_key":         "",
+
+    # ── Long-term memory (Apollo) ─────────────────────────────────────────
+    "_comment_memory":       "Long-term memory settings — requires Apollo memory service running",
+    "memory_enabled":        True,
+    "memory_service_url":    "http://YOUR_APOLLO_IP:8100",
     "memory_interval_sec":   300,
-    "memory_enabled":        True
+    "memory_max_entries":    120,
+    "memory_min_keywords":   2,
+    "max_memories_recalled": 5,
+
+    # ── Logging ───────────────────────────────────────────────────────────
+    "_comment_log":          "How many past sessions to keep in covas_session.log before purging older ones",
+    "log_max_sessions":      5,
 }
 
 if os.path.exists(CONFIG_FILE):
@@ -142,19 +167,23 @@ else:
     except Exception as e:
         log(f"WARN: Could not write default config.json: {e}")
 
-OLLAMA_BASE_URL      = config["ollama_base_url"]
-OLLAMA_MODEL         = config["ollama_model"]
-SERVER_HOST          = config["server_host"]
-SERVER_PORT          = config["server_port"]
-TEMPERATURE          = float(config["temperature"])
-MAX_HISTORY_MESSAGES = int(config["max_history_messages"])
-REQUEST_TIMEOUT      = int(config["request_timeout_sec"])
-SEARCH_CACHE_SIZE    = int(config["search_cache_size"])
-MAX_SEARCH_RESULTS   = int(config["max_search_results"])
-LOG_MAX_SESSIONS     = int(config["log_max_sessions"])
-MEMORY_SERVICE_URL   = config["memory_service_url"]
-MEMORY_INTERVAL_SEC  = int(config["memory_interval_sec"])
-MEMORY_ENABLED       = bool(config["memory_enabled"])
+OLLAMA_BASE_URL       = config["ollama_base_url"]
+OLLAMA_MODEL          = config["ollama_model"]
+SERVER_HOST           = config["server_host"]
+SERVER_PORT           = config["server_port"]
+TEMPERATURE           = float(config["temperature"])
+MAX_HISTORY_MESSAGES  = int(config["max_history_messages"])
+HISTORY_GAP_MINUTES   = int(config.get("history_gap_minutes", 8))
+REQUEST_TIMEOUT       = int(config["request_timeout_sec"])
+SEARCH_CACHE_SIZE     = int(config["search_cache_size"])
+MAX_SEARCH_RESULTS    = int(config["max_search_results"])
+MAX_TOOL_ITERATIONS   = int(config.get("max_tool_iterations", 5))
+LOG_MAX_SESSIONS      = int(config["log_max_sessions"])
+MEMORY_SERVICE_URL    = config["memory_service_url"]
+MEMORY_INTERVAL_SEC   = int(config["memory_interval_sec"])
+MEMORY_ENABLED        = bool(config["memory_enabled"])
+MEMORY_MAX_ENTRIES    = int(config.get("memory_max_entries", 120))
+MAX_MEMORIES_RECALLED = int(config.get("max_memories_recalled", 5))
 
 # ── Elite Dangerous Journal Path ──────────────────────────────────────────────
 # Override in config.json with "ed_journal_path" if your install is non-standard.
@@ -2198,7 +2227,7 @@ async def chat_completions(req: ChatRequest):
             elif msg.role == "assistant":
                 lc_messages.append(AIMessage(content=msg.content))
 
-        response_text = run_with_tools(lc_messages, use_tools=not disable_tools)
+        response_text = run_with_tools(lc_messages, use_tools=not disable_tools, max_iterations=MAX_TOOL_ITERATIONS)
         _stats["requests_ok"] += 1
 
     except Exception as e:

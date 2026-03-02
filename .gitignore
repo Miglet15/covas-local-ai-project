@@ -1,36 +1,21 @@
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-.Python
-*.egg-info/
-dist/
-build/
-
-# Runtime / generated files
+# ── Runtime / generated files ────────────────────────────────────────────────
 logs/
-data/covas_memories.json
+__pycache__/
+*.pyc
+*.pyo
 
-# Themes — user-specific EDHM exports, not part of source
+# ── Sensitive config — copy config.example.json → config.json and fill in your values
+# config.json contains your Apollo IP and API keys — never commit it
+config/config.json
+config.json
+
+# ── Ignoring any currently installed Themes, leaving only the Themes folder for push
 themes/
 
-# Environment
-.env
-.venv
+# ── Data files that are auto-generated or personal ───────────────────────────
+data/covas_memories.json
+
+# ── Python venv ───────────────────────────────────────────────────────────────
+.venv/
 venv/
 env/
-
-# IDE
-.vscode/
-.idea/
-*.sublime-project
-*.sublime-workspace
-
-# OS
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# Apollo Docker volumes (if checked out alongside)
-covas-memory/__pycache__/
