@@ -19,3 +19,7 @@ data/covas_memories.json
 # ── Secrets / local overrides ─────────────────────────────────────────────────
 # If you ever create a local config override, keep it out of the repo
 config/config.local.json
+
+# ── Themes ────────────────────────────────────────────────────────────────────
+# Keeps Themes folder, But not contents
+themes/*

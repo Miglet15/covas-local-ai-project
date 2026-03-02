@@ -101,6 +101,8 @@ except Exception as e:
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR    = os.path.join(SCRIPT_DIR, "data")
 LOGS_DIR    = os.path.join(SCRIPT_DIR, "logs")
+THEMES_DIR  = os.path.join(SCRIPT_DIR, "themes")
+os.makedirs(THEMES_DIR, exist_ok=True)
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config", "config.json")
 
 DEFAULT_CONFIG = {
@@ -904,235 +906,175 @@ def status_page():
       --head:    'Rajdhani', sans-serif;
     }}
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-
-    body {{
-      font-family: var(--mono);
-      background: var(--bg);
-      color: var(--text);
-      min-height: 100vh;
-      overflow-x: hidden;
-    }}
-
-    /* Scanline overlay */
+    body {{ font-family: var(--mono); background: var(--bg); color: var(--text); min-height: 100vh; overflow-x: hidden; }}
     body::before {{
-      content: '';
-      position: fixed; inset: 0; pointer-events: none; z-index: 100;
-      background: repeating-linear-gradient(
-        0deg, transparent, transparent 3px,
-        rgba(0,0,0,0.07) 3px, rgba(0,0,0,0.07) 4px
-      );
+      content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 100;
+      background: repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,0.07) 3px,rgba(0,0,0,0.07) 4px);
     }}
-
-    /* Ambient vignette */
     body::after {{
-      content: '';
-      position: fixed; inset: 0; pointer-events: none; z-index: 99;
-      background: radial-gradient(ellipse 80% 80% at 50% 50%, transparent 40%, rgba(0,0,0,0.6) 100%);
+      content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 99;
+      background: radial-gradient(ellipse 80% 80% at 50% 50%,transparent 40%,rgba(0,0,0,0.6) 100%);
     }}
 
     /* ── HEADER ── */
-    .hdr {{
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 0 32px;
-      height: 84px;
-      border-bottom: 1px solid var(--border);
-      background: linear-gradient(180deg, #0b1020 0%, var(--bg) 100%);
-      position: relative;
-    }}
-    .hdr::after {{
-      content: '';
-      position: absolute; bottom: 0; left: 0; right: 0; height: 1px;
-      background: linear-gradient(90deg, transparent, var(--or), transparent);
-      opacity: 0.4;
-    }}
-    .hdr-glow {{
-      position: absolute; inset: 0; pointer-events: none;
-      background: radial-gradient(ellipse 50% 150% at 50% -50%, rgba(224,106,16,0.08), transparent);
-    }}
-
-    .logo {{
-      display: flex; align-items: baseline; gap: 12px; position: relative;
-    }}
-    .logo-main {{
-      font-family: var(--head); font-size: 42px; font-weight: 700;
-      letter-spacing: 8px; color: var(--or2);
-      text-shadow: 0 0 24px rgba(255,136,48,0.5), 0 0 48px rgba(255,136,48,0.15);
-    }}
-    .logo-slash {{
-      color: var(--dim); font-family: var(--head); font-size: 32px; font-weight: 300;
-    }}
-    .logo-sub {{
-      font-family: var(--head); font-size: 16px; font-weight: 300;
-      letter-spacing: 5px; color: var(--am); text-transform: uppercase;
-    }}
-
-    .hdr-right {{
-      text-align: right; font-size: 13px; color: var(--dim);
-      line-height: 2; letter-spacing: 1px;
-    }}
-    .hdr-right em {{ font-style: normal; color: var(--am); }}
+    .hdr {{ display:flex; align-items:center; justify-content:space-between; padding:0 32px; height:84px; border-bottom:1px solid var(--border); background:linear-gradient(180deg,#0b1020 0%,var(--bg) 100%); position:relative; }}
+    .hdr::after {{ content:''; position:absolute; bottom:0; left:0; right:0; height:1px; background:linear-gradient(90deg,transparent,var(--or),transparent); opacity:0.4; }}
+    .hdr-glow {{ position:absolute; inset:0; pointer-events:none; background:radial-gradient(ellipse 50% 150% at 50% -50%,var(--or-glow),transparent); }}
+    .logo {{ display:flex; align-items:baseline; gap:12px; position:relative; }}
+    .logo-main {{ font-family:var(--head); font-size:42px; font-weight:700; letter-spacing:8px; color:var(--or2); text-shadow:0 0 24px var(--or-glow),0 0 48px var(--or-glow); }}
+    .logo-slash {{ color:var(--dim); font-family:var(--head); font-size:32px; font-weight:300; }}
+    .logo-sub {{ font-family:var(--head); font-size:16px; font-weight:300; letter-spacing:5px; color:var(--am); text-transform:uppercase; }}
+    .hdr-right {{ text-align:right; font-size:13px; color:var(--dim); line-height:2; letter-spacing:1px; }}
+    .hdr-right em {{ font-style:normal; color:var(--am); }}
 
     /* ── STATUS BAR ── */
-    .sbar {{
-      display: flex; align-items: stretch;
-      border-bottom: 1px solid var(--border);
-      background: var(--bg2);
-      height: 52px;
-    }}
-    .spill {{
-      display: flex; align-items: center; gap: 10px;
-      padding: 0 24px; font-family: var(--head);
-      font-size: 14px; font-weight: 600; letter-spacing: 3px;
-      text-transform: uppercase; border-right: 1px solid var(--border);
-    }}
-    .spill.right {{ margin-left: auto; border-right: none; border-left: 1px solid var(--border); font-weight: 300; color: var(--dim); font-size: 13px; }}
-    .dot {{
-      width: 11px; height: 11px; border-radius: 50%;
-      background: currentColor; flex-shrink: 0;
-    }}
-    .ok   {{ color: var(--ok); }}
-    .err  {{ color: var(--err); }}
-    .warn {{ color: var(--warn); }}
-    .dim  {{ color: var(--dim); }}
+    .sbar {{ display:flex; align-items:stretch; border-bottom:1px solid var(--border); background:var(--bg2); height:52px; }}
+    .spill {{ display:flex; align-items:center; gap:10px; padding:0 24px; font-family:var(--head); font-size:14px; font-weight:600; letter-spacing:3px; text-transform:uppercase; border-right:1px solid var(--border); }}
+    .spill.right {{ margin-left:auto; border-right:none; border-left:1px solid var(--border); font-weight:300; color:var(--dim); font-size:13px; }}
+    .dot {{ width:11px; height:11px; border-radius:50%; background:currentColor; flex-shrink:0; }}
+    .ok  {{ color:var(--ok); }} .err {{ color:var(--err); }} .warn {{ color:var(--warn); }} .dim {{ color:var(--dim); }}
     @keyframes pulse {{ 0%,100%{{opacity:1}} 50%{{opacity:0.3}} }}
-    .pulse {{ animation: pulse 2s ease-in-out infinite; }}
+    .pulse {{ animation:pulse 2s ease-in-out infinite; }}
 
     /* ── BIG STATS ── */
-    .bstats {{
-      display: grid;
-      grid-template-columns: repeat(5, 1fr);
-      border-bottom: 1px solid var(--border);
-    }}
-    .bstat {{
-      padding: 26px 32px; border-right: 1px solid var(--border);
-      position: relative; background: var(--bg);
-      transition: background 0.2s;
-    }}
-    .bstat:last-child {{ border-right: none; }}
-    .bstat::before {{
-      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
-      background: linear-gradient(90deg, var(--or), transparent);
-      opacity: 0;
-      transition: opacity 0.2s;
-    }}
-    .bstat:hover {{ background: #080c18; }}
-    .bstat:hover::before {{ opacity: 0.5; }}
-    .bnum {{
-      font-family: var(--head); font-size: 58px; font-weight: 700;
-      color: var(--or2); line-height: 1;
-      text-shadow: 0 0 20px rgba(255,136,48,0.2);
-    }}
-    .blbl {{
-      font-family: var(--head); font-size: 12px; font-weight: 500;
-      letter-spacing: 3px; text-transform: uppercase;
-      color: var(--dim); margin-top: 5px;
-    }}
-    .bsub {{ font-size: 12px; color: #1e2e48; margin-top: 3px; }}
+    .bstats {{ display:grid; grid-template-columns:repeat(5,1fr); border-bottom:1px solid var(--border); }}
+    .bstat {{ padding:26px 32px; border-right:1px solid var(--border); position:relative; background:var(--bg); transition:background 0.2s; }}
+    .bstat:last-child {{ border-right:none; }}
+    .bstat::before {{ content:''; position:absolute; top:0; left:0; right:0; height:2px; background:linear-gradient(90deg,var(--or),transparent); opacity:0; transition:opacity 0.2s; }}
+    .bstat:hover {{ background:#080c18; }}
+    .bstat:hover::before {{ opacity:0.5; }}
+    .bnum {{ font-family:var(--head); font-size:58px; font-weight:700; color:var(--or2); line-height:1; text-shadow:0 0 20px var(--or-glow); }}
+    .blbl {{ font-family:var(--head); font-size:12px; font-weight:500; letter-spacing:3px; text-transform:uppercase; color:var(--dim); margin-top:6px; }}
+    .bsub {{ font-size:12px; color:#1e2e48; margin-top:3px; }}
 
-    /* ── MAIN LAYOUT ── */
-    .layout {{
-      display: grid;
-      grid-template-columns: 380px 1fr;
-      min-height: calc(100vh - 64px - 40px - 80px - 48px);
-      border-bottom: 1px solid var(--border);
-    }}
-    .lcol {{ border-right: 1px solid var(--border); display: flex; flex-direction: column; }}
-
-    /* ── PANELS ── */
-    .panel {{ border-bottom: 1px solid var(--border); }}
-    .panel:last-child {{ border-bottom: none; flex: 1; }}
-    .ptitle {{
-      font-family: var(--head); font-size: 12px; font-weight: 600;
-      letter-spacing: 3px; text-transform: uppercase;
-      color: var(--or); padding: 9px 20px;
-      background: linear-gradient(90deg, rgba(224,106,16,0.07), transparent);
-      border-bottom: 1px solid var(--border);
-      display: flex; align-items: center; gap: 8px;
-    }}
-    .ptitle::before {{
-      content: '◆'; font-size: 7px; color: var(--or2);
-    }}
-
-    /* Corner bracket decoration for panels */
-    .bracketed {{ position: relative; }}
-    .bracketed::before, .bracketed::after {{
-      content: ''; position: absolute;
-      width: 8px; height: 8px;
-      border-color: var(--or); border-style: solid;
-      opacity: 0.4;
-    }}
-    .bracketed::before {{ top: 8px; left: 8px; border-width: 1px 0 0 1px; }}
-    .bracketed::after  {{ bottom: 8px; right: 8px; border-width: 0 1px 1px 0; }}
-
-    /* Info table */
-    .itable {{ width: 100%; border-collapse: collapse; }}
-    .itable td {{
-      padding: 9px 24px; font-size: 13px;
-      border-bottom: 1px solid #0e1624;
-    }}
-    .itable tr:last-child td {{ border-bottom: none; }}
-    .itable td:first-child {{ color: var(--dim); width: 160px; letter-spacing: 0.5px; }}
-    .itable td:last-child {{ color: var(--hi); }}
-
-    /* Category list */
-    .catlist {{ padding: 16px 24px; display: flex; flex-direction: column; gap: 9px; }}
-    .cat-row {{ display: flex; align-items: center; justify-content: space-between; }}
-    .tag {{
-      font-size: 12px; border: 1px solid; border-radius: 1px;
-      padding: 2px 9px; letter-spacing: 1.5px; text-transform: uppercase;
-      font-family: var(--head); font-weight: 600;
-    }}
-    .cat-count {{ font-family: var(--head); font-size: 20px; font-weight: 600; color: var(--hi); }}
-
-    /* Memory table */
-    .mtable {{ width: 100%; border-collapse: collapse; }}
-    .mtable th {{
-      font-family: var(--head); font-size: 11px; font-weight: 500;
-      letter-spacing: 3px; text-transform: uppercase;
-      color: var(--dim); padding: 11px 20px;
-      border-bottom: 1px solid var(--border);
-      background: var(--bg2); text-align: left;
-    }}
-    .mtable td {{
-      padding: 11px 20px; font-size: 13px;
-      border-bottom: 1px solid #0b1020;
-      vertical-align: top; transition: background 0.15s;
-    }}
-    .mtable tr:hover td {{ background: rgba(224,106,16,0.03); }}
-    .mtable tr:last-child td {{ border-bottom: none; }}
-    .ts-cell {{ color: var(--dim); white-space: nowrap; font-size: 12px; }}
-    .topic-txt {{ color: var(--hi); margin-bottom: 2px; }}
-    .sum-txt {{ color: var(--dim); font-size: 12px; line-height: 1.5; }}
-    .mission-tag {{
-      font-family: var(--head); font-size: 13px; font-weight: 600;
-      letter-spacing: 1px; color: var(--am);
-      text-transform: uppercase;
-    }}
-    .credit-txt {{ color: var(--ok); }}
-    .empty-cell {{
-      text-align: center; padding: 32px 20px !important;
-      color: var(--dim); letter-spacing: 3px; font-size: 13px;
-      font-family: var(--head); font-weight: 400;
-    }}
-    .dim-txt {{ color: var(--dim); }}
-
-    /* ── MISSIONS PANEL ── */
-    .mispanel {{ border-bottom: 1px solid var(--border); }}
+    /* ── LAYOUT ── */
+    .layout {{ display:grid; grid-template-columns:380px 1fr; min-height:calc(100vh - 84px - 52px - 90px - 50px); border-bottom:1px solid var(--border); }}
+    .lcol {{ border-right:1px solid var(--border); display:flex; flex-direction:column; }}
+    .panel {{ border-bottom:1px solid var(--border); }}
+    .panel:last-child {{ border-bottom:none; flex:1; }}
+    .ptitle {{ font-family:var(--head); font-size:12px; font-weight:600; letter-spacing:3px; text-transform:uppercase; color:var(--or); padding:12px 24px; background:linear-gradient(90deg,var(--or-glow),transparent); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:8px; }}
+    .ptitle::before {{ content:'◆'; font-size:7px; color:var(--or2); }}
+    .bracketed {{ position:relative; }}
+    .bracketed::before,.bracketed::after {{ content:''; position:absolute; width:8px; height:8px; border-color:var(--or); border-style:solid; opacity:0.3; }}
+    .bracketed::before {{ top:8px; left:8px; border-width:1px 0 0 1px; }}
+    .bracketed::after  {{ bottom:8px; right:8px; border-width:0 1px 1px 0; }}
+    .itable {{ width:100%; border-collapse:collapse; }}
+    .itable td {{ padding:9px 24px; font-size:13px; border-bottom:1px solid #0e1624; }}
+    .itable tr:last-child td {{ border-bottom:none; }}
+    .itable td:first-child {{ color:var(--dim); width:160px; letter-spacing:0.5px; }}
+    .itable td:last-child {{ color:var(--hi); }}
+    .catlist {{ padding:16px 24px; display:flex; flex-direction:column; gap:9px; }}
+    .cat-row {{ display:flex; align-items:center; justify-content:space-between; }}
+    .tag {{ font-size:12px; border:1px solid; border-radius:1px; padding:2px 9px; letter-spacing:1.5px; text-transform:uppercase; font-family:var(--head); font-weight:600; }}
+    .cat-count {{ font-family:var(--head); font-size:20px; font-weight:600; color:var(--hi); }}
+    .mtable {{ width:100%; border-collapse:collapse; }}
+    .mtable th {{ font-family:var(--head); font-size:11px; font-weight:500; letter-spacing:3px; text-transform:uppercase; color:var(--dim); padding:11px 20px; border-bottom:1px solid var(--border); background:var(--bg2); text-align:left; }}
+    .mtable td {{ padding:11px 20px; font-size:13px; border-bottom:1px solid #0b1020; vertical-align:top; transition:background 0.15s; }}
+    .mtable tr:hover td {{ background:rgba(224,106,16,0.03); }}
+    .mtable tr:last-child td {{ border-bottom:none; }}
+    .ts-cell {{ color:var(--dim); white-space:nowrap; font-size:12px; }}
+    .topic-txt {{ color:var(--hi); margin-bottom:2px; }}
+    .sum-txt {{ color:var(--dim); font-size:12px; line-height:1.5; }}
+    .mission-tag {{ font-family:var(--head); font-size:13px; font-weight:600; letter-spacing:1px; color:var(--am); text-transform:uppercase; }}
+    .credit-txt {{ color:var(--ok); }}
+    .empty-cell {{ text-align:center; padding:32px 20px !important; color:var(--dim); letter-spacing:3px; font-size:13px; font-family:var(--head); font-weight:400; }}
+    .dim-txt {{ color:var(--dim); }}
+    .mispanel {{ border-bottom:1px solid var(--border); }}
 
     /* ── FOOTER ── */
-    .footer {{
-      display: flex; justify-content: space-between; align-items: center;
-      padding: 16px 40px; font-size: 12px; color: var(--dim);
-      letter-spacing: 1.5px; background: var(--bg2);
-      border-top: 1px solid var(--border);
+    .footer {{ display:flex; justify-content:space-between; align-items:center; padding:16px 40px; font-size:12px; color:var(--dim); letter-spacing:1.5px; background:var(--bg2); border-top:1px solid var(--border); }}
+    .footer-brand {{ color:#1e2e48; }}
+    .footer span {{ color:#283850; }}
+
+    /* ── THEME PANEL ── */
+    .theme-trigger {{
+      position:fixed; bottom:0; right:0; z-index:200;
+      display:flex; align-items:center; gap:10px;
+      padding:10px 20px;
+      background:var(--bg2); border-top:1px solid var(--border); border-left:1px solid var(--border);
+      font-family:var(--head); font-size:11px; font-weight:600;
+      letter-spacing:2px; text-transform:uppercase;
+      color:var(--or); cursor:pointer;
+      transition:background 0.2s;
+      user-select:none;
     }}
-    .footer-brand {{ color: #1e2e48; }}
-    .footer span {{ color: #283850; }}
+    .theme-trigger:hover {{ background:var(--bg3); }}
+    .theme-trigger .t-dot {{ width:8px; height:8px; border-radius:50%; background:var(--or); flex-shrink:0; }}
+    .theme-trigger .t-name {{ color:var(--am); max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+
+    .theme-drawer {{
+      position:fixed; bottom:0; right:0; z-index:201;
+      width:360px;
+      background:var(--bg2); border:1px solid var(--border); border-bottom:none; border-right:none;
+      transform:translateY(100%);
+      transition:transform 0.25s ease;
+      display:flex; flex-direction:column;
+    }}
+    .theme-drawer.open {{ transform:translateY(0); }}
+    .theme-drawer-hdr {{
+      display:flex; align-items:center; justify-content:space-between;
+      padding:12px 20px;
+      border-bottom:1px solid var(--border);
+      font-family:var(--head); font-size:12px; font-weight:600;
+      letter-spacing:3px; text-transform:uppercase; color:var(--or);
+      background:linear-gradient(90deg,var(--or-glow),transparent);
+    }}
+    .theme-close {{
+      cursor:pointer; color:var(--dim); font-size:18px; line-height:1;
+      padding:0 4px; transition:color 0.15s;
+    }}
+    .theme-close:hover {{ color:var(--or); }}
+    .theme-body {{ padding:16px 20px; display:flex; flex-direction:column; gap:14px; overflow-y:auto; max-height:420px; }}
+
+    .t-section-label {{
+      font-family:var(--head); font-size:10px; font-weight:500;
+      letter-spacing:3px; text-transform:uppercase; color:var(--dim);
+      margin-bottom:2px;
+    }}
+    .theme-list {{ display:flex; flex-direction:column; gap:6px; }}
+    .theme-item {{
+      display:flex; align-items:center; gap:10px; padding:8px 12px;
+      border:1px solid var(--border); cursor:pointer;
+      transition:border-color 0.15s, background 0.15s;
+      font-size:12px;
+    }}
+    .theme-item:hover {{ border-color:var(--or); background:rgba(224,106,16,0.04); }}
+    .theme-item.active {{ border-color:var(--or); background:var(--or-glow); }}
+    .theme-item .ti-swatch {{
+      width:14px; height:14px; border-radius:1px; flex-shrink:0;
+      border:1px solid rgba(255,255,255,0.1);
+    }}
+    .theme-item .ti-info {{ flex:1; min-width:0; }}
+    .theme-item .ti-name {{ color:var(--hi); font-family:var(--head); font-weight:600; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+    .theme-item .ti-author {{ color:var(--dim); font-size:10px; margin-top:1px; }}
+
+    .upload-zone {{
+      border:1px dashed var(--dim); padding:14px 16px;
+      text-align:center; cursor:pointer; transition:border-color 0.15s, background 0.15s;
+      font-size:12px; color:var(--dim); letter-spacing:1px;
+      position:relative;
+    }}
+    .upload-zone:hover {{ border-color:var(--or); color:var(--or); background:var(--or-glow); }}
+    .upload-zone input {{ position:absolute; inset:0; opacity:0; cursor:pointer; width:100%; }}
+    .upload-zone .upload-icon {{ font-size:20px; margin-bottom:4px; }}
+
+    .t-divider {{ border:none; border-top:1px solid var(--border); }}
+    .t-reset-btn {{
+      padding:8px 16px; background:transparent; border:1px solid var(--dim);
+      color:var(--dim); font-family:var(--mono); font-size:11px; cursor:pointer;
+      letter-spacing:1px; text-transform:uppercase; transition:all 0.15s; width:100%;
+    }}
+    .t-reset-btn:hover {{ border-color:var(--err); color:var(--err); }}
+
+    .t-preview-bar {{
+      height:4px;
+      background:linear-gradient(90deg, var(--or), var(--am), var(--teal));
+      margin: 0;
+    }}
   </style>
 </head>
 <body>
 
-<!-- HEADER -->
 <div class="hdr">
   <div class="hdr-glow"></div>
   <div class="logo">
@@ -1147,7 +1089,6 @@ def status_page():
   </div>
 </div>
 
-<!-- STATUS BAR -->
 <div class="sbar">
   <div class="spill">
     <div class="dot ok pulse"></div>
@@ -1162,7 +1103,8 @@ def status_page():
   <div class="spill right">&#8635;&nbsp; AUTO&#8209;REFRESH 10s</div>
 </div>
 
-<!-- BIG STATS -->
+<div class="t-preview-bar"></div>
+
 <div class="bstats">
   <div class="bstat">
     <div class="bnum">{_stats["requests_total"]}</div>
@@ -1191,10 +1133,7 @@ def status_page():
   </div>
 </div>
 
-<!-- MAIN LAYOUT -->
 <div class="layout">
-
-  <!-- LEFT COLUMN -->
   <div class="lcol">
     <div class="panel bracketed">
       <div class="ptitle">UNIT&#8209;01 &mdash; Ship AI</div>
@@ -1209,63 +1148,332 @@ def status_page():
         <tr><td>Cmdr Profile</td> <td class="{profile_cls}">{profile_txt}</td></tr>
       </table>
     </div>
-
     <div class="panel bracketed">
       <div class="ptitle">Apollo &mdash; Memory Service</div>
       <table class="itable">
         <tr><td>Status</td>       <td class="{apollo_cls}">{apollo_lbl}</td></tr>
         <tr><td>Last Ingest</td>  <td>{mem_last_ingest}</td></tr>
-        <tr><td>Session ID</td>   <td style="font-size:9px;word-break:break-all;color:var(--dim)">{mem_session}</td></tr>
+        <tr><td>Session ID</td>   <td style="font-size:10px;word-break:break-all;color:var(--dim)">{mem_session}</td></tr>
       </table>
     </div>
-
     <div class="panel">
       <div class="ptitle">Memory by Category</div>
       <div class="catlist">{cat_rows}</div>
     </div>
   </div>
-
-  <!-- RIGHT COLUMN: Recent Memories -->
   <div>
     <div class="panel" style="height:100%">
       <div class="ptitle">Recent Memories</div>
       <table class="mtable">
-        <thead>
-          <tr>
-            <th style="width:110px">Timestamp</th>
-            <th style="width:120px">Category</th>
-            <th>Topic &amp; Summary</th>
-          </tr>
-        </thead>
+        <thead><tr>
+          <th style="width:110px">Timestamp</th>
+          <th style="width:120px">Category</th>
+          <th>Topic &amp; Summary</th>
+        </tr></thead>
         <tbody>{mem_rows}</tbody>
       </table>
     </div>
   </div>
 </div>
 
-<!-- MISSIONS -->
 <div class="mispanel">
   <div class="ptitle">Active Elite Dangerous Missions</div>
   <table class="mtable">
-    <thead>
-      <tr><th>Type</th><th>Giver</th><th>Origin</th><th>Destination</th><th>Reward</th></tr>
-    </thead>
+    <thead><tr><th>Type</th><th>Giver</th><th>Origin</th><th>Destination</th><th>Reward</th></tr></thead>
     <tbody>{mission_rows}</tbody>
   </table>
 </div>
 
-<!-- FOOTER -->
 <div class="footer">
   <div class="footer-brand">COVAS LOCAL AI BRIDGE</div>
   <div><span>MODEL:</span> {OLLAMA_MODEL} &nbsp;&#9642;&nbsp; <span>TEMP:</span> {TEMPERATURE} &nbsp;&#9642;&nbsp; <span>PORT:</span> {SERVER_PORT}</div>
   <div><span>APOLLO:</span> {MEMORY_SERVICE_URL}</div>
 </div>
 
+<!-- THEME TRIGGER (always visible bottom-right) -->
+<div class="theme-trigger" onclick="toggleThemePanel()">
+  <div class="t-dot"></div>
+  <span>THEME</span>
+  <span class="t-name" id="active-theme-name">DEFAULT</span>
+  <span style="color:var(--dim);margin-left:4px">&#9650;</span>
+</div>
+
+<!-- THEME DRAWER -->
+<div class="theme-drawer" id="theme-drawer">
+  <div class="theme-drawer-hdr">
+    <span>◆ &nbsp;EDHM THEME ENGINE</span>
+    <span class="theme-close" onclick="toggleThemePanel()">&#x2715;</span>
+  </div>
+  <div class="theme-body">
+    <div>
+      <div class="t-section-label">Server Themes</div>
+      <div class="theme-list" id="server-theme-list">
+        <div class="dim-txt" style="font-size:11px;padding:8px 0">Loading...</div>
+      </div>
+    </div>
+    <hr class="t-divider">
+    <div>
+      <div class="t-section-label" style="margin-bottom:8px">Import EDHM Theme</div>
+      <div class="upload-zone" id="upload-zone">
+        <input type="file" accept=".json" id="theme-upload" onchange="handleThemeUpload(event)">
+        <div class="upload-icon">&#8659;</div>
+        <div>Drop ThemeSettings.json here</div>
+        <div style="font-size:10px;margin-top:4px;color:var(--dim)">or click to browse</div>
+      </div>
+    </div>
+    <hr class="t-divider">
+    <button class="t-reset-btn" onclick="resetTheme()">&#x2715; &nbsp;Reset to Default</button>
+  </div>
+</div>
+
+<script>
+// ── THEME ENGINE ──────────────────────────────────────────────────────────────
+
+const STORAGE_KEY = 'covas_active_theme';
+const THEMES_KEY  = 'covas_themes';
+
+// Convert signed int32 ARGB to {{r,g,b,hex}}
+function int32ToRGB(value) {{
+  const u = value >>> 0;
+  return {{
+    r: (u >> 16) & 0xFF,
+    g: (u >> 8)  & 0xFF,
+    b:  u        & 0xFF,
+    a: (u >> 24) & 0xFF,
+  }};
+}}
+
+function rgbToHex(r, g, b) {{
+  return '#' + [r,g,b].map(v => v.toString(16).padStart(2,'0')).join('');
+}}
+
+function clamp(v) {{ return Math.max(0, Math.min(255, Math.round(v))); }}
+
+// Extract dominant color from EDHM ThemeSettings.json
+function extractColors(data) {{
+  const counts = {{}};
+  for (const group of data.ui_groups || []) {{
+    for (const el of group.Elements || []) {{
+      if (el.ValueType === 'Color' && el.Value !== -1 && el.Value !== 0 && el.Value != null) {{
+        counts[el.Value] = (counts[el.Value] || 0) + 1;
+      }}
+    }}
+  }}
+  // Sort by frequency, skip pure-black and near-white
+  const sorted = Object.entries(counts)
+    .map(([v, c]) => ({{ value: parseInt(v), count: c, rgb: int32ToRGB(parseInt(v)) }}))
+    .filter(e => {{
+      const {{ r,g,b }} = e.rgb;
+      const lum = r*0.299 + g*0.587 + b*0.114;
+      return lum > 15 && lum < 245; // not pure black or white
+    }})
+    .sort((a,b) => b.count - a.count);
+
+  const primary = sorted[0]?.rgb || {{ r:224, g:106, b:16 }};
+  // Look for a secondary color (significantly different hue)
+  const secondary = sorted.find(e => {{
+    const d = Math.abs(e.rgb.r - primary.r) + Math.abs(e.rgb.g - primary.g) + Math.abs(e.rgb.b - primary.b);
+    return d > 80;
+  }})?.rgb || null;
+
+  return {{ primary, secondary, raw: sorted }};
+}}
+
+// Build CSS variable set from extracted colors
+function buildCSSVars(primary, secondary) {{
+  const {{ r, g, b }} = primary;
+  const br = clamp(r * 1.35), bg = clamp(g * 1.35), bb = clamp(b * 1.35);
+  // Amber: shift hue slightly warmer
+  const ar = clamp(r * 0.85 + 40), ag = clamp(g * 0.7 + 15), ab = clamp(b * 0.5);
+  // Border: very dark tint of primary
+  const xr = Math.max(16, clamp(r * 0.14 + 8));
+  const xg = Math.max(10, clamp(g * 0.12 + 6));
+  const xb = Math.max(14, clamp(b * 0.12 + 8));
+
+  const vars = {{
+    '--or':      `rgb(${{r}},${{g}},${{b}})`,
+    '--or2':     `rgb(${{br}},${{bg}},${{bb}})`,
+    '--or-glow': `rgba(${{r}},${{g}},${{b}},0.15)`,
+    '--am':      `rgb(${{ar}},${{ag}},${{ab}})`,
+    '--border':  `rgb(${{xr}},${{xg}},${{xb}})`,
+  }};
+
+  if (secondary) {{
+    vars['--teal'] = `rgb(${{secondary.r}},${{secondary.g}},${{secondary.b}})`;
+  }}
+  return vars;
+}}
+
+// Apply a CSS variable map to :root
+function applyVars(vars) {{
+  const root = document.documentElement;
+  for (const [k, v] of Object.entries(vars)) root.style.setProperty(k, v);
+}}
+
+// Full theme apply from parsed data
+function applyTheme(data, name) {{
+  const {{ primary, secondary }} = extractColors(data);
+  const vars = buildCSSVars(primary, secondary);
+  applyVars(vars);
+  const hex = rgbToHex(primary.r, primary.g, primary.b);
+  const swatchEl = document.getElementById('active-swatch');
+  if (swatchEl) swatchEl.style.background = hex;
+  const nameEl = document.getElementById('active-theme-name');
+  if (nameEl) nameEl.textContent = (data.credits?.theme || name || 'Custom').toUpperCase();
+  // Save to localStorage
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({{ name, vars, hex, label: data.credits?.theme || name }}));
+  updateActiveHighlight(name);
+}}
+
+function resetTheme() {{
+  localStorage.removeItem(STORAGE_KEY);
+  const root = document.documentElement;
+  ['--or','--or2','--or-glow','--am','--border','--teal'].forEach(v => root.style.removeProperty(v));
+  const nameEl = document.getElementById('active-theme-name');
+  if (nameEl) nameEl.textContent = 'DEFAULT';
+  updateActiveHighlight(null);
+}}
+
+// Restore saved theme on page load
+function restoreTheme() {{
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (!saved) return;
+  try {{
+    const {{ name, vars, label }} = JSON.parse(saved);
+    applyVars(vars);
+    const nameEl = document.getElementById('active-theme-name');
+    if (nameEl) nameEl.textContent = (label || 'Custom').toUpperCase();
+    updateActiveHighlight(name);
+  }} catch(e) {{ console.warn('Theme restore failed', e); }}
+}}
+
+// ── SERVER THEME LIST ─────────────────────────────────────────────────────────
+
+async function loadServerThemes() {{
+  const list = document.getElementById('server-theme-list');
+  try {{
+    const res = await fetch('/api/themes');
+    const {{ themes }} = await res.json();
+    if (!themes.length) {{
+      list.innerHTML = '<div class="dim-txt" style="font-size:11px;padding:8px 0">No themes in themes/ folder</div>';
+      return;
+    }}
+    list.innerHTML = '';
+    for (const t of themes) {{
+      const item = document.createElement('div');
+      item.className = 'theme-item';
+      item.dataset.name = t.name;
+      // Preview swatch — load the JSON to get colors
+      fetch(`/api/themes/${{t.name}}`).then(r => r.json()).then(data => {{
+        const {{ primary }} = extractColors(data);
+        const hex = rgbToHex(primary.r, primary.g, primary.b);
+        item.querySelector('.ti-swatch').style.background = hex;
+      }}).catch(()=>{{}});
+      item.innerHTML = `
+        <div class="ti-swatch"></div>
+        <div class="ti-info">
+          <div class="ti-name">${{t.theme || t.name}}</div>
+          <div class="ti-author">by ${{t.author || 'Unknown'}}</div>
+        </div>
+      `;
+      item.onclick = () => loadServerTheme(t.name);
+      list.appendChild(item);
+    }}
+    updateActiveHighlight(null); // refresh highlights
+  }} catch(e) {{
+    list.innerHTML = '<div class="dim-txt" style="font-size:11px;padding:8px 0">Could not load themes</div>';
+  }}
+}}
+
+async function loadServerTheme(name) {{
+  try {{
+    const res = await fetch(`/api/themes/${{name}}`);
+    const data = await res.json();
+    applyTheme(data, name);
+  }} catch(e) {{ console.error('Failed to load server theme', e); }}
+}}
+
+function updateActiveHighlight(activeName) {{
+  document.querySelectorAll('.theme-item').forEach(el => {{
+    el.classList.toggle('active', el.dataset.name === activeName);
+  }});
+}}
+
+// ── FILE UPLOAD ───────────────────────────────────────────────────────────────
+
+function handleThemeUpload(event) {{
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {{
+    try {{
+      const data = JSON.parse(e.target.result);
+      const themeName = file.name.replace('.json','');
+      applyTheme(data, themeName);
+      const zone = document.getElementById('upload-zone');
+      zone.querySelector('div:not(input)').style.color = 'var(--ok)';
+      setTimeout(() => {{ zone.querySelector('div:not(input)').style.color = ''; }}, 2000);
+    }} catch(err) {{
+      alert('Invalid ThemeSettings.json file: ' + err.message);
+    }}
+  }};
+  reader.readAsText(file);
+}}
+
+// ── PANEL TOGGLE ──────────────────────────────────────────────────────────────
+
+function toggleThemePanel() {{
+  const drawer = document.getElementById('theme-drawer');
+  const isOpen = drawer.classList.toggle('open');
+  if (isOpen) loadServerThemes();
+}}
+
+// ── INIT ──────────────────────────────────────────────────────────────────────
+restoreTheme();
+</script>
+
 </body>
 </html>"""
     return HTMLResponse(content=html)
 
 
+
+
+
+# ── Theme API ─────────────────────────────────────────────────────────────────
+import glob
+
+@app.get("/api/themes")
+def list_themes():
+    """Return available themes from the themes/ directory."""
+    themes = []
+    for path in glob.glob(os.path.join(THEMES_DIR, "*", "ThemeSettings.json")):
+        name = os.path.basename(os.path.dirname(path))
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            credits = data.get("credits", {})
+            themes.append({
+                "name":        name,
+                "theme":       credits.get("theme", name),
+                "author":      credits.get("author", "Unknown"),
+                "description": credits.get("description", ""),
+                "preview":     credits.get("preview", ""),
+            })
+        except Exception:
+            themes.append({"name": name, "theme": name, "author": "", "description": "", "preview": ""})
+    return {"themes": themes}
+
+@app.get("/api/themes/{name}")
+def get_theme(name: str):
+    """Return the full ThemeSettings.json for a given theme folder name."""
+    # Sanitise name to prevent path traversal
+    safe = os.path.basename(name)
+    path = os.path.join(THEMES_DIR, safe, "ThemeSettings.json")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Theme not found")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 @app.get("/v1/models")
 def list_models():
