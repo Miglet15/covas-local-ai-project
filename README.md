@@ -1,224 +1,178 @@
 # COVAS Local AI — Ship AI Bridge
 
-A local AI co-pilot system for [COVAS:NEXT](https://www.covasnext.com/), powered by Ollama.
-Provides an OpenAI-compatible `/v1/chat/completions` endpoint that COVAS:NEXT connects to,
-with Elite Dangerous lore injection, long-term memory via a dedicated memory service,
-live ship state parsing from ED journal files, and tiered web search via INARA/DuckDuckGo.
+> a local LLM middleware layer for [COVAS:NEXT](https://github.com/RatherRude/Elite-Dangerous-AI-Integration), because paying per-token to talk to my spaceship felt morally wrong  
+> vibe-coded with Claude. it works. mostly.
 
 ---
 
-## Architecture — Two Servers
+## what this is
 
-This project spans two separate machines with distinct roles.
+[COVAS:NEXT](https://github.com/RatherRude/Elite-Dangerous-AI-Integration) is an Elite Dangerous AI companion — it reads your game state, listens to your voice, and responds as your ship's computer in actual spoken words like we're living in the 34th century and not at our desks at 2am. it supports speech-to-text, text-to-speech, and an LLM backend of your choosing. normally that backend is OpenAI or some other cloud service.
 
-### UNIT-01 — Gaming & AI Server
-UNIT-01 is the machine where everything game-related runs:
+this project is that backend, running entirely on your own machine.
 
-- **Elite Dangerous** — the game itself
-- **COVAS:NEXT** — the voice co-pilot frontend that connects to the AI bridge
-- **`ship_ai_server.py`** — the COVAS AI bridge server (this repo's main server)
-- **`covas_memory_client.py`** — background client that forwards session transcripts to Apollo
+it's a Python FastAPI server that presents an OpenAI-compatible `/v1/chat/completions` endpoint. COVAS:NEXT doesn't know the difference. under the hood it's talking to [Ollama](https://ollama.com/), with a few layers of extra context piled on top:
 
-UNIT-01 hosts the AI bridge on port `8080` (configurable). COVAS:NEXT points at `http://localhost:8080/v1`.
+- **lore injection** — Elite Dangerous universe context automatically added to every prompt so your local model actually knows what a Thargoid is
+- **commander profile** — your character's background, preferences, and personality, loaded into context
+- **long-term memory** — notable things from past sessions get stored and recalled later so your AI doesn't develop amnesia every time you close the game
+- **live ship state** — parses current game state into the prompt (where you are, what you're flying, etc.)
+- **web search** — tiered INARA / DuckDuckGo lookups so it can answer questions about systems, stations, and factions without confidently making things up
 
-### Apollo — Memory & Summarisation Server
-Apollo is a separate machine running Ubuntu with Docker. Its sole purpose is long-term memory:
+the end result: a ship's computer that runs locally, costs nothing per query, and actually has some continuity between sessions.
 
-- Receives session transcripts from UNIT-01 at regular intervals and on session end
-- Uses **Phi-3 Mini via Ollama** to extract and structure memories from raw conversation logs
-- Stores everything in a persistent SQLite database
-- Exposes a REST API that UNIT-01 queries to inject relevant memories into each prompt
+---
 
-Apollo runs on port `8100`. UNIT-01 reaches it over the local network or Tailscale.
+## this is a two-repo system
+
+> **this server doesn't run alone.** long-term memory is handled by a separate companion service.
+
+the memory backend lives in **[covas-apollo-project](https://github.com/Miglet15/covas-apollo-project/)** — a microservice that runs on a home server (or any always-on machine you have sitting around), receives session transcripts from this server, runs them through a small local LLM to extract structured memories, and stores them in SQLite.
+
+**why split it out?** because the gaming PC is doing enough already, and a home server with Docker can quietly handle memory extraction in the background without touching your framerates. also it's a better architecture than a json file that gets read on every request. (the json file is still there for fallback. do not judge me.)
+
+### full architecture
 
 ```
-┌─────────────────────────────────────────┐     ┌──────────────────────────────────┐
-│               UNIT-01                   │     │              Apollo              │
-│                                         │     │                                  │
-│  Elite Dangerous ──► COVAS:NEXT         │     │  Docker                          │
-│                          │              │     │  ├── ollama  (phi3:mini)         │
-│                          ▼              │     │  └── covas-memory  :8100         │
-│               ship_ai_server.py :8080   │────►│       ├── /ingest                │
-│               covas_memory_client.py    │◄────│       ├── /stats                 │
-│                          │              │     │       ├── /errors                │
-│                          ▼              │     │       ├── /memories/recent       │
-│               Ollama (llama3.1:8b)      │     │       └── /ed/missions/active    │
-└─────────────────────────────────────────┘     └──────────────────────────────────┘
+COVAS:NEXT
+    │  voice I/O, game integration, UI
+    │  HTTP → localhost
+    ▼
+covas-local-ai-project  (this repo — gaming PC)
+    │  FastAPI, Ollama, lore + ship state injection, web search
+    │
+    ├──► Ollama  (local model, inference)
+    │
+    └──► covas-apollo-project  (home server — Docker)
+              FastAPI memory service, Phi-3 Mini, SQLite
+              ← stores structured memories from session transcripts
+              → recalled into context on next session
+```
+
+you need both repos running for the full experience. if the memory service is unreachable, the server degrades gracefully — it'll still work, just without persistent memory.
+
+---
+
+## requirements
+
+- Python 3.11+
+- [Ollama](https://ollama.com/) running locally with your chosen model pulled
+- [COVAS:NEXT](https://github.com/RatherRude/Elite-Dangerous-AI-Integration) installed
+- **[covas-apollo-project](https://github.com/Miglet15/covas-apollo-project/)** running somewhere on your network (required for memory)
+
+```bash
+pip install fastapi uvicorn pydantic langchain-ollama langchain-core ddgs
 ```
 
 ---
 
-## Project Structure
+## setup
+
+**1. get the memory service running first**
+
+see [covas-apollo-project](https://github.com/Miglet15/covas-apollo-project/) for setup. it's Docker-based so it's mostly just `docker compose up -d --build` once you've placed the files. you'll need Ollama on that machine too, pulling `phi3:mini` for memory extraction.
+
+once it's up, confirm it's healthy:
+```bash
+curl http://your-server-ip:8100/health
+# {"status":"ok"}
+```
+
+**2. pull a model for this server**
+
+something with decent context length and instruction following. `llama3.1:8b` is the default and roughly the floor for tool-calling to work reliably. 14b+ is more comfortable if your hardware can do it.
+
+```bash
+ollama pull llama3.1:8b
+```
+
+**3. configure**
+
+edit `config/config.json`. at minimum: model name, port, and the memory service address. full reference below.
+
+**4. write your commander profile**
+
+`data/commander_profile.md` — freeform markdown, completely up to you. this is what makes the AI feel like *your* ship's computer rather than a generic one. name, background, faction allegiances, roleplay preferences, how you want it to address you, what it should and shouldn't bring up. it gets injected into every system prompt.
+
+spend a little time on this one. it's worth it.
+
+**5. start the server**
+
+```bash
+python ship_ai_server.py
+```
+
+or on windows, double-click `start_ship_ai.bat`.
+
+status page available at `http://localhost:<port>/` — confirms it's running and shows current config.
+
+**6. point COVAS:NEXT at it**
+
+in COVAS:NEXT settings, set your LLM provider to custom/OpenAI-compatible and point it at:
+
+```
+http://localhost:<port>/v1
+```
+
+that's it. COVAS:NEXT will talk to this server exactly like it would any other API. it genuinely doesn't care.
+
+---
+
+## project structure
 
 ```
 covas-local-ai-project/
-│
-│  ── UNIT-01 files ──────────────────────────────────────
-├── ship_ai_server.py            # Main AI bridge server
-├── covas_memory_client.py       # Memory service client (sends to Apollo)
-├── start_ship_ai.bat            # Windows launcher
-│
 ├── config/
-│   └── config.json              # All tunable settings
+│   └── config.json              # all the knobs — edit this
 ├── data/
-│   ├── commander_profile.md     # Commander background & preferences
-│   ├── elite_lore.md            # Elite Dangerous lore injected into prompts
-│   └── covas_memories.json      # Runtime memory store (auto-generated)
+│   ├── commander_profile.md     # your character — actually edit this one
+│   ├── elite_lore.md            # ED universe context injected into every prompt
+│   └── covas_memories.json      # fallback memory store (auto-generated)
 ├── logs/
-│   └── covas_session.log        # Session log (auto-generated, gitignored)
-│
-│  ── Apollo (Docker) files ──────────────────────────────
-├── docker-compose.yml           # Spins up Ollama + covas-memory
-└── covas-memory/
-    ├── Dockerfile
-    ├── requirements.txt
-    ├── main.py                  # FastAPI memory service
-    ├── storage.py               # SQLite layer
-    ├── summarizer.py            # Ollama/Phi-3 memory extraction
-    └── models.py                # Pydantic schemas
+│   └── covas_session.log        # session log (auto-generated, gitignored)
+├── ship_ai_server.py            # the server
+├── covas_memory_client.py       # memory client — talks to the memory service
+├── start_ship_ai.bat            # windows launcher
+└── README.md
 ```
 
 ---
 
-## UNIT-01 Setup
+## config reference
 
-### Requirements
-- Python 3.11+
-- [Ollama](https://ollama.com/) running locally with your chosen model pulled
-- COVAS:NEXT installed
-
-```bash
-pip install fastapi uvicorn pydantic langchain-ollama langchain-core ddgs requests httpx
-```
-
-### 1. Configure
-Edit `config/config.json` (created automatically on first run with defaults):
-
-| Key | Default | Description |
+| key | default | description |
 |-----|---------|-------------|
-| `ollama_model` | `llama3.1:8b` | Ollama model to use |
-| `temperature` | `0.7` | Model temperature |
-| `server_port` | `8080` | Port COVAS:NEXT connects to |
-| `max_history_messages` | `10` | Conversation turns kept per request |
-| `history_gap_minutes` | `8` | Inactivity gap before history is cleared |
-| `log_max_sessions` | `5` | Past sessions retained in the log file |
-| `max_tool_iterations` | `5` | Tool-call rounds per request |
-| `max_search_results` | `5` | Web search results fetched per query |
-| `max_memories_recalled` | `5` | Memory segments injected per prompt |
-| `memory_enabled` | `true` | Enable/disable long-term memory |
-| `memory_service_url` | `http://192.168.1.65:8100` | Apollo's address |
-| `memory_interval_sec` | `300` | How often to push transcripts to Apollo |
-
-### 2. Add your Commander profile
-Place your background and preferences in `data/commander_profile.md`.
-
-### 3. Run
-```bash
-python ship_ai_server.py
-# or on Windows:
-start_ship_ai.bat
-```
-
-### 4. Point COVAS:NEXT at it
-Set the API endpoint in COVAS:NEXT to: `http://localhost:8080/v1`
-
-Status page: `http://localhost:8080/`
+| `ollama_model` | `llama3.1:8b` | which Ollama model to use |
+| `temperature` | `0.7` | model temperature |
+| `server_port` | `8080` | port COVAS:NEXT connects to |
+| `max_history_messages` | `10` | conversation turns kept per request |
+| `history_gap_minutes` | `8` | inactivity gap before history clears |
+| `log_max_sessions` | `5` | past sessions retained in log file |
+| `max_tool_iterations` | `5` | tool-call rounds per request |
+| `max_search_results` | `5` | web search results fetched per query |
+| `max_memories_recalled` | `5` | memory segments injected per prompt |
+| `memory_enabled` | `true` | toggle long-term memory on/off |
+| `memory_max_entries` | `120` | max stored memory segments (fallback store) |
 
 ---
 
-## Apollo Setup
+## notes / known state of things
 
-### Requirements
-- Docker + Docker Compose
-- The `covas-memory/` folder and `docker-compose.yml` from this repo
-
-### 1. Pull the Phi-3 Mini model
-```bash
-docker exec -it ollama ollama pull phi3:mini
-```
-
-### 2. Place files on Apollo
-```
-/home/mike/covas/
-├── docker-compose.yml
-└── covas-memory/
-    ├── Dockerfile
-    ├── requirements.txt
-    ├── main.py
-    ├── storage.py
-    ├── summarizer.py
-    └── models.py
-```
-
-### 3. Build and start
-```bash
-cd /home/mike/covas
-docker compose up -d --build
-```
-
-### 4. Verify
-```bash
-curl http://localhost:8100/health
-# {"status": "ok", "time": "..."}
-```
-
-Status page: `http://localhost:8100/`
+- the `dev` branch is active. it may lag behind my local copy after a big session — i push when things are stable enough to not embarrass me
+- model quality matters a lot here. smaller models will fumble the tool-calling required for web search and memory recall. 8b is the rough minimum, 14b+ is noticeably better at it
+- if the memory service is unreachable (server's off, wrong IP, etc.) the memory client fails gracefully and falls back to the local JSON store. you lose cross-session persistence but nothing breaks
+- INARA search handles Elite Dangerous-specific queries (systems, stations, factions). DuckDuckGo handles everything else
+- the fallback memory is stored as a flat JSON file. it's fine for personal use, not trying to be a database
 
 ---
 
-## Apollo API Endpoints
+## related
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/health` | Service health check |
-| `GET` | `/stats` | Runtime stats — polled by UNIT-01 status page |
-| `POST` | `/ingest` | Receive session transcript from UNIT-01 |
-| `POST` | `/memories/query` | Search/filter memories |
-| `GET` | `/memories/recent` | Most recent memories |
-| `GET` | `/memories/session/{id}` | All memories for a session |
-| `GET` | `/ed/missions/active` | Active ED missions |
-| `PATCH` | `/ed/missions/{id}/status` | Update mission status |
-| `GET` | `/errors` | Full error log (persisted across restarts) |
-| `DELETE` | `/errors` | Clear all errors from log and DB |
+- **[covas-apollo-project](https://github.com/Miglet15/covas-apollo-project/)** — the companion memory service. run this too
+- [COVAS:NEXT](https://github.com/RatherRude/Elite-Dangerous-AI-Integration) — the actual Elite Dangerous integration this bridges to. the real project. go star it
+- [Ollama](https://ollama.com/) — local model runtime
+- [INARA](https://inara.cz/) — Elite Dangerous companion site, used for faction/system lookups
 
 ---
 
-## Memory Categories
-
-| Category | Used for |
-|----------|----------|
-| `general` | General conversation |
-| `elite_dangerous` | Game events, exploration, combat |
-| `person` | Named individuals (NPCs or real) |
-| `place` | Systems, stations, locations |
-| `preference` | Commander preferences and settings |
-| `task` | Tasks or follow-ups |
-
----
-
-## UNIT-01 Status Page
-
-The status page at `http://localhost:8080/` provides a live dashboard showing:
-
-- UNIT-01 and Apollo online status
-- Request, search, and memory counters
-- Session log viewer (with syntax highlighting and line count control)
-- Recent memories table
-- Active ED missions
-- Memory error log with **Clear All** to dismiss stale errors after a planned restart
-- EDHM theme engine — import any `ThemeSettings.json` from the EDHM UI mod to recolour the entire UI
-
-The page auto-refreshes every 10 seconds but **pauses** while any panel or the theme drawer is open so you aren't interrupted mid-read.
-
----
-
-## Database (Apollo)
-
-SQLite stored at `/data/covas_memory.db` inside the container, mapped to a Docker named volume (`memory_data`) for persistence across restarts and rebuilds.
-
-```bash
-# Inspect directly on Apollo
-docker exec -it covas-memory sqlite3 /data/covas_memory.db ".tables"
-docker exec -it covas-memory sqlite3 /data/covas_memory.db "SELECT * FROM memories ORDER BY created_at DESC LIMIT 5;"
-docker exec -it covas-memory sqlite3 /data/covas_memory.db "SELECT * FROM error_log ORDER BY id DESC LIMIT 10;"
-```
+*Elite Dangerous and related assets are property of Frontier Developments.*
