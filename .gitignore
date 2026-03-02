@@ -1,0 +1,21 @@
+# ── Runtime / generated files ────────────────────────────────────────────────
+logs/
+__pycache__/
+*.pyc
+*.pyo
+
+# ── Sensitive config — copy config.example.json → config.json and fill in your values
+# config.json contains your Apollo IP and API keys — never commit it
+config/config.json
+config.json
+
+# ── Ignoring any currently installed Themes, leaving only the Themes folder for push
+themes/
+
+# ── Data files that are auto-generated or personal ───────────────────────────
+data/covas_memories.json
+
+# ── Python venv ───────────────────────────────────────────────────────────────
+.venv/
+venv/
+env/

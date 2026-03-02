@@ -73,16 +73,22 @@ class MemoryClient:
             "trigger": trigger,
             "ed_context": ed_context
         }
-        try:
-            resp = requests.post(
-                f"{self.service_url}/ingest",
-                json=payload,
-                timeout=10
-            )
-            resp.raise_for_status()
-            log.info(f"[MemoryClient] Sent ({trigger}) → {resp.status_code}")
-        except requests.RequestException as e:
-            log.warning(f"[MemoryClient] Failed to send to memory service: {e}")
+        for attempt in range(2):
+            try:
+                resp = requests.post(
+                    f"{self.service_url}/ingest",
+                    json=payload,
+                    timeout=10
+                )
+                resp.raise_for_status()
+                log.info(f"[MemoryClient] Sent ({trigger}) → {resp.status_code}")
+                return
+            except requests.RequestException as e:
+                if attempt == 0:
+                    log.warning(f"[MemoryClient] Send failed ({e}), retrying in 5s...")
+                    import time as _t; _t.sleep(5)
+                else:
+                    log.warning(f"[MemoryClient] Failed after retry — data lost for this interval: {e}")
 
     def send_session_end(self, ed_context: Optional[dict] = None):
         """Call this when the COVAS session ends."""
