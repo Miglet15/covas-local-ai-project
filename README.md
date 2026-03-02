@@ -1,6 +1,6 @@
 # COVAS Local AI — Ship AI Bridge
 
-A local AI bridge server for [COVAS:NEXT](https://www.covasnext.com/), powered by Ollama. Provides an OpenAI-compatible `/v1/chat/completions` endpoint that COVAS:NEXT connects to, with Elite Dangerous lore injection, long-term memory via a dedicated memory microservice, live ship state parsing, and tiered web search via INARA/DuckDuckGo.
+A local AI bridge server for [COVAS:NEXT](https://ratherrude.github.io/Elite-Dangerous-AI-Integration/), powered by Ollama. Provides an OpenAI-compatible `/v1/chat/completions` endpoint that COVAS:NEXT connects to, with Elite Dangerous lore injection, long-term memory via a dedicated memory microservice, live ship state parsing, and tiered web search via INARA/DuckDuckGo.
 
 ---
 
