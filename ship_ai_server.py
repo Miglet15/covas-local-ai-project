@@ -4,7 +4,8 @@ import json
 import re
 import time
 import threading
-from datetime import datetime
+import glob
+from datetime import datetime, timedelta
 from collections import OrderedDict
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -154,6 +155,18 @@ LOG_MAX_SESSIONS     = int(config["log_max_sessions"])
 MEMORY_SERVICE_URL   = config["memory_service_url"]
 MEMORY_INTERVAL_SEC  = int(config["memory_interval_sec"])
 MEMORY_ENABLED       = bool(config["memory_enabled"])
+
+# ── Elite Dangerous Journal Path ──────────────────────────────────────────────
+# Override in config.json with "ed_journal_path" if your install is non-standard.
+_default_ed_path = os.path.join(
+    os.path.expandvars("%USERPROFILE%"),
+    "Saved Games", "Frontier Developments", "Elite Dangerous"
+)
+ED_JOURNAL_PATH = config.get("ed_journal_path", _default_ed_path)
+
+# ── Server Start Time ─────────────────────────────────────────────────────────
+SERVER_START_TIME = time.time()
+
 # ── Memory Client (optional — graceful fallback if not present) ───────────────
 _memory = None
 if MEMORY_ENABLED:
@@ -209,6 +222,187 @@ if os.path.exists(PROFILE_FILE):
         log(f"WARN: Could not load commander profile: {e}")
 else:
     log(f"WARN: No commander profile found — place commander_profile.md in the data/ folder.")
+
+
+# ── Elite Dangerous Live Data Readers ────────────────────────────────────────
+
+def _read_ed_status() -> dict:
+    """Read ED's live Status.json. Returns {} if unavailable."""
+    path = os.path.join(ED_JOURNAL_PATH, "Status.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _read_latest_journal() -> dict:
+    """
+    Scan the most recent journal file for current system, ship name/type,
+    and module health from the last Loadout event.
+    """
+    result = {"system": None, "ship_name": None, "ship_type": None, "modules": []}
+    try:
+        journals = sorted(
+            glob.glob(os.path.join(ED_JOURNAL_PATH, "Journal.*.log")),
+            reverse=True
+        )
+        if not journals:
+            return result
+        with open(journals[0], "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        found_system  = False
+        found_loadout = False
+        core_slots = {
+            "PowerPlant", "MainEngines", "FrameShiftDrive",
+            "LifeSupport", "PowerDistributor", "Radar", "FuelTank", "Armour",
+        }
+        for line in reversed(lines):
+            try:
+                evt = json.loads(line.strip())
+            except Exception:
+                continue
+            etype = evt.get("event", "")
+            if not found_system and etype in ("FSDJump", "Location", "CarrierJump"):
+                result["system"] = evt.get("StarSystem")
+                found_system = True
+            if not found_loadout and etype == "Loadout":
+                result["ship_name"] = evt.get("ShipName") or None
+                result["ship_type"] = evt.get("Ship_Localised") or evt.get("Ship") or None
+                modules = []
+                for slot in evt.get("Modules", []):
+                    slot_name = slot.get("Slot", "")
+                    health    = slot.get("Health", None)
+                    item      = slot.get("Item_Localised") or slot.get("Item") or ""
+                    if slot_name in core_slots and health is not None:
+                        modules.append({"slot": slot_name, "item": item, "health": health})
+                result["modules"] = modules
+                found_loadout = True
+            if found_system and found_loadout:
+                break
+    except Exception as e:
+        log(f"Journal read error: {e}")
+    return result
+
+
+def build_system_report() -> str:
+    """
+    Build a system diagnostic report for COVAS.
+    Real data : ED Status.json + Journal. Flair-only: environmental systems.
+    """
+    uptime_secs = int(time.time() - SERVER_START_TIME)
+    h, rem      = divmod(uptime_secs, 3600)
+    m, s        = divmod(rem, 60)
+    uptime_str  = f"{h}h {m}m {s}s" if h else f"{m}m {s}s"
+
+    status  = _read_ed_status()
+    journal = _read_latest_journal()
+
+    flags       = status.get("Flags", 0)
+    fuel        = status.get("Fuel", {})
+    fuel_main   = fuel.get("FuelMain",      None)
+    fuel_res    = fuel.get("FuelReservoir", None)
+    hull        = status.get("HullHealth",  None)
+    cargo_mass  = status.get("Cargo",       None)
+    temperature = status.get("Temperature", None)
+    pips        = status.get("Pips",        None)
+
+    docked      = bool(flags & (1 << 0))
+    landed      = bool(flags & (1 << 1))
+    shields_up  = bool(flags & (1 << 3))
+    supercruise = bool(flags & (1 << 4))
+    in_srv      = bool(flags & (1 << 26))
+
+    current_system = journal.get("system") or "Unknown"
+    ship_name      = journal.get("ship_name")
+    ship_type      = journal.get("ship_type")
+    modules        = journal.get("modules", [])
+
+    if docked:
+        flight_state = "Docked"
+    elif landed:
+        flight_state = "Surface Landed"
+    elif supercruise:
+        flight_state = "Supercruise"
+    elif in_srv:
+        flight_state = "SRV Deployed"
+    else:
+        flight_state = "Normal Space"
+
+    lines = []
+
+    lines.append("NAVIGATION")
+    lines.append(f"  Current System : {current_system}")
+    if ship_type:
+        vessel_line = f"  Vessel         : {ship_type}"
+        if ship_name:
+            vessel_line += f"  ({ship_name})"
+        lines.append(vessel_line)
+    lines.append(f"  Flight State   : {flight_state}")
+    lines.append("")
+
+    lines.append("SHIP SYSTEMS")
+    if status:
+        if fuel_main is not None:
+            lines.append(f"  Main Fuel Tank : {fuel_main:.2f} T")
+        if fuel_res is not None:
+            lines.append(f"  Fuel Reservoir : {fuel_res:.3f} T")
+        if hull is not None:
+            hull_pct    = hull * 100
+            hull_status = "Optimal" if hull_pct >= 80 else ("Degraded" if hull_pct >= 40 else "CRITICAL")
+            lines.append(f"  Hull Integrity : {hull_pct:.1f}%  [{hull_status}]")
+        if cargo_mass is not None:
+            lines.append(f"  Cargo Hold     : {cargo_mass:.0f} T")
+        if temperature is not None and temperature > 0.5:
+            heat_pct    = temperature * 100
+            heat_status = "WARNING" if temperature > 0.8 else "Elevated"
+            lines.append(f"  Heat Signature : {heat_pct:.0f}%  [{heat_status}]")
+        else:
+            lines.append("  Heat Signature : Nominal")
+        lines.append(f"  Shields        : {'Online' if shields_up else 'Offline'}")
+        if pips:
+            lines.append(f"  Power Pips     : SYS {pips[0]/2:.1f}  ENG {pips[1]/2:.1f}  WPN {pips[2]/2:.1f}")
+    else:
+        lines.append("  [Status.json unavailable — launch Elite Dangerous for live telemetry]")
+    lines.append("")
+
+    SLOT_LABELS = {
+        "PowerPlant":       "Power Plant   ",
+        "MainEngines":      "Thrusters     ",
+        "FrameShiftDrive":  "Frame Shift   ",
+        "LifeSupport":      "Life Support  ",
+        "PowerDistributor": "Distributor   ",
+        "Radar":            "Sensors       ",
+        "FuelTank":         "Fuel Tank     ",
+        "Armour":           "Hull Plating  ",
+    }
+    if modules:
+        lines.append("MODULE STATUS  (last Loadout event)")
+        for mod in modules:
+            label      = SLOT_LABELS.get(mod["slot"], mod["slot"].ljust(14))
+            health_pct = mod["health"] * 100
+            mod_status = "OK" if health_pct >= 80 else ("DEGRADED" if health_pct >= 40 else "CRITICAL")
+            lines.append(f"  {label}: {health_pct:.0f}%  [{mod_status}]")
+    else:
+        lines.append("MODULE STATUS  : Loadout data unavailable (no Loadout event in journal)")
+    lines.append("")
+
+    lines.append("ENVIRONMENTAL")
+    lines.append("  Life Support   : Cycling nominal")
+    lines.append("  Canopy Seal    : Integrity confirmed")
+    if not temperature or temperature <= 0.5:
+        lines.append("  Thermal Systems: Within safe parameters")
+    lines.append("")
+
+    mem_status = "Online" if (_memory is not None) else "Disabled"
+    lines.append("COVAS CORE")
+    lines.append(f"  AI Architecture: {OLLAMA_MODEL}")
+    lines.append(f"  System Uptime  : {uptime_str}")
+    lines.append(f"  Memory Service : {mem_status}")
+    lines.append(f"  Context Window : {MAX_HISTORY_MESSAGES} turns")
+
+    return "\n".join(lines)
 
 
 def _rotate_log():
@@ -313,17 +507,6 @@ CONVERSATIONAL_PATTERNS = [
     r"\bwhat('s| is) your name\b",
     r"\bwho are you\b",
     r"\btest(ing)?\b",
-    # Ship / system status — handled natively by COVAS:NEXT
-    r"\b(full |ship |system |run a )?system(s)? (report|check|status|diagnostic|readout|overview)\b",
-    r"\b(display|show)( me)?( a| the)? (full |ship |system )?( report| status|diagnostic)\b",
-    r"\brun diagnostics?\b",
-    r"\ball systems\b",
-    r"\bship status\b",
-    r"\bstatus (report|check|update)\b",
-    r"\bsystems (check|nominal|online|status|report)\b",
-    r"\b(how('s| is)|what('s| is)) (the )?(ship|hull|shields?|power|fuel|cargo)\b",
-    r"\b(you should be|you're|you are) (back )?(online|active|running|up)\b",
-    r"\b(power|shields?|hull|fuel|cargo|thrusters?) (status|level|check|reading|report)\b",
     # Small talk / affirmations that should never trigger a search
     r"^\s*(mm+[-h]*|hmm+|yep|nope|yup|sure|ok+a*y*|alright|fair enough|cool|nice|perfect|great|awesome|roger|copy|understood|noted|right|fair|exactly|indeed|absolutely|agreed)\s*[.!]*\s*$",
     r"^\s*(so|we|yes|no|good|bad|fine|done|nice|wow|oh|ah|hm+|uh+|er+)\s*[.!]*\s*$",
@@ -342,7 +525,43 @@ CONVERSATIONAL_PATTERNS = [
 
 def is_conversational(message: str) -> bool:
     msg_lower = message.lower()
+    # If the message contains a diagnostic/status request, tools must stay enabled
+    # regardless of any greeting or check-in language also present.
+    if is_diagnostic_request(msg_lower):
+        return False
     return any(re.search(p, msg_lower) for p in CONVERSATIONAL_PATTERNS)
+
+# ── Diagnostic Request Detection ──────────────────────────────────────────────
+# These patterns indicate the Commander wants a systems report or status data.
+# A diagnostic request always overrides the conversational guard.
+_DIAGNOSTIC_PATTERNS = [
+    # "full system diagnosis/report/status/diagnostic..."
+    r"\bfull system (report|check|status|diagnostic|readout|overview|breakdown|diagnosis)\b",
+    r"\bfull ship (report|check|status|diagnostic|readout|overview|breakdown|diagnosis)\b",
+    # "system(s) report/diagnostic/status..."
+    r"\bsystem(s)? (report|check|status|diagnostic|readout|overview|breakdown|diagnosis)\b",
+    r"\bship (status|report|diagnostic|breakdown)\b",
+    # "run a diagnostic / run diagnostics"
+    r"\brun (a |the )?diagnostic\b",
+    r"\brun (a |the )?system(s)? (check|report|scan)\b",
+    # "give me" + anything + a diagnostic keyword (up to 50 chars between)
+    r"\bgive me\b.{0,50}\b(report|status|breakdown|readout|diagnosis|diagnostic)\b",
+    # "display/show me a [full] status/diagnostic"
+    r"\b(display|show)( me)?( a| the)?.{0,20}\b(report|status|diagnostic)\b",
+    # "all systems" / "status report" / "status check"
+    r"\ball systems\b",
+    r"\bstatus (report|check|update)\b",
+    r"\bsystems (check|nominal|online|status|report|breakdown)\b",
+    # Specific ship component queries
+    r"\b(how('s| is)|what('s| is)) (the )?(ship|hull|shields?|power|fuel|cargo)\b",
+    r"\b(power|shields?|hull|fuel|cargo|thrusters?) (status|level|check|reading|report)\b",
+    # "I need data / a report / status"
+    r"\bi need (data|a report|status|a readout)\b",
+]
+
+def is_diagnostic_request(message: str) -> bool:
+    msg_lower = message.lower()
+    return any(re.search(p, msg_lower) for p in _DIAGNOSTIC_PATTERNS)
 
 # ── Game Event Detection ──────────────────────────────────────────────────────
 # COVAS:NEXT sends automated game state messages with these prefixes.
@@ -379,14 +598,20 @@ GAME EVENTS: Messages starting with [Game Event] or [IMPORTANT Game Event] are a
 notifications from ship systems. Acknowledge them briefly or stay silent — never search the web for them.
 NPC names, pilot names, and ship names in game events are not searchable — do not attempt to look them up.
 
-TOOL USE — web_search is available for one purpose only:
-  Use it ONLY when the Commander explicitly asks you to look something up, find current prices,
-  or check live data that cannot be answered from existing knowledge.
-  NEVER use it for: game events, NPC names, pilot names, status updates, combat events,
-  FSD jumps, supercruise events, docking events, greetings, or anything you can answer yourself.
-  If in doubt — do not search.
+TOOL USE — two tools are available:
 
-IMPORTANT: Never mention, reference, or hint at your decision to search or not search.
+  get_system_status — Call this when the Commander asks for a systems report, diagnostic,
+  ship status, hull/shield/fuel readings, or any breakdown of ship or COVAS systems.
+  This reads live verified data. Always use this tool — never guess or invent system data.
+  When presenting the results, give a thorough response covering all sections returned.
+
+  web_search — Use ONLY when the Commander explicitly asks you to search for something,
+  or when you genuinely need live external data (commodity prices, community goals, recent news).
+  NEVER use web_search for: system diagnostics, game events, NPC or pilot names, combat updates,
+  lore questions, mechanics, greetings, or anything answerable from existing knowledge.
+  Treat web_search as a last resort. If there is any doubt — do not search.
+
+IMPORTANT: Never mention, reference, or hint at your decision to use or not use a tool.
 Never say phrases like "I will not make a function call", "this doesn't warrant a search",
 "since I can infer", or any similar internal reasoning. Just respond naturally in character.
 
@@ -555,14 +780,33 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_system_status",
+            "description": (
+                "Run a full diagnostic of ship systems and COVAS core. "
+                "Use this when the Commander asks for: a systems report, diagnostics, "
+                "a ship status breakdown, module status, fuel levels, hull integrity, "
+                "shield status, or any 'how are your systems' / 'give me a readout' query. "
+                "This reads live data — do not attempt to answer these from memory or guess."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "web_search",
             "description": (
-                "Retrieve external intelligence data from the GalNet long-range network. "
-                "Use ONLY as a last resort when the Commander explicitly requests a search, "
-                "or when real-time data is required such as current commodity prices, live "
-                "community goals, or recent patch notes that cannot be answered from existing "
-                "knowledge. Do NOT use for general game knowledge, lore, mechanics, greetings, "
-                "status checks, or anything already known. When in doubt, do not search."
+                "Retrieve external intelligence from the GalNet long-range network. "
+                "Use this ONLY when the Commander explicitly asks you to search for something, "
+                "look up current commodity prices, check live community goals, or find "
+                "information that genuinely cannot be answered from existing knowledge. "
+                "NEVER use for: system diagnostics, status checks, game events, NPC names, "
+                "combat events, docking, greetings, lore questions, mechanics questions, "
+                "or anything you already know. Treat this as a last resort. When in doubt — do not search."
             ),
             "parameters": {
                 "type": "object",
@@ -671,7 +915,25 @@ def run_with_tools(messages: list, use_tools: bool = True, max_iterations: int =
                 tool_name = tc["name"]
                 tool_args = tc["args"]
                 log(f"[TOOL] {tool_name}({tool_args})")
-                if tool_name == "web_search":
+                if tool_name == "get_system_status":
+                    log("Running system diagnostic...")
+                    report = build_system_report()
+                    result = (
+                        report
+                        + "\n\n[Present the complete diagnostic above to the Commander in character. "
+                        "Cover every section. Include all readings — do not skip or summarise any section.]"
+                    )
+                    # Inject richer hint so model gives a full response not 1-3 sentences
+                    messages.append(ToolMessage(
+                        content=(
+                            f"[DIAGNOSTIC DATA — present ALL sections to the Commander in character. "
+                            f"Cover each section: navigation, ship systems, module status, environmental, "
+                            f"and COVAS core. Speak in plain sentences, no bullet points or headers.]\n\n{result}"
+                        ),
+                        tool_call_id=tc["id"]
+                    ))
+                    continue
+                elif tool_name == "web_search":
                     log("Retrieving intelligence data...")
                     t_s = time.time()
                     result = run_web_search(tool_args.get("query", ""))
@@ -703,16 +965,23 @@ def run_with_tools(messages: list, use_tools: bool = True, max_iterations: int =
                 normalized = tool_name.lower().strip()
 
                 if normalized in SHIP_ACTION_NAMES:
-                    # Model hallucinated a ship action — strip it, return nothing
                     log(f"[TOOL-FALLBACK] Hallucinated ship action stripped: {tool_name}")
                     cleaned = strip_json_tool_calls(response.content)
                     if cleaned:
                         return cleaned
-                    # If nothing left after strip, let the model try again without tools
                     messages.append(
                         HumanMessage(content="[System: respond in plain text only, no JSON or function calls]")
                     )
                     continue
+
+                elif normalized == "get_system_status":
+                    log("Running system diagnostic (fallback)...")
+                    result = build_system_report()
+                    messages.append(HumanMessage(content=(
+                        f"[DIAGNOSTIC DATA — present ALL sections to the Commander in character. "
+                        f"Cover each section: navigation, ship systems, module status, environmental, "
+                        f"and COVAS core. Speak in plain sentences, no bullet points or headers.]\n\n{result}"
+                    )))
 
                 elif normalized == "web_search" or normalized in SEARCH_ALIASES:
                     query = tool_args.get("query", "") or tool_args.get("q", "")
@@ -784,7 +1053,19 @@ _stats = {
     "searches_general": 0,
     "cache_hits":       0,
     "last_request":     None,
+    "memory_error_log": [],   # list of {timestamp, message, context} dicts
 }
+
+def _record_memory_error(message: str, context: str = ""):
+    """Record a memory-related error to the local error log (capped at 100)."""
+    entry = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "message":   message,
+        "context":   context,
+    }
+    _stats["memory_error_log"].append(entry)
+    if len(_stats["memory_error_log"]) > 100:
+        _stats["memory_error_log"] = _stats["memory_error_log"][-100:]
 
 # ── FastAPI App ───────────────────────────────────────────────────────────────
 app = FastAPI(title="COVAS Ship AI Bridge")
@@ -828,6 +1109,7 @@ async def status_page():
     by_category         = {}
     recent_memories     = []
     active_missions     = []
+    error_log           = []   # ← new: list of error detail strings
 
     if _memory is not None:
         try:
@@ -845,12 +1127,36 @@ async def status_page():
                     mem_last_ingest     = _d.get("last_ingest") or "None yet"
                     by_category         = _d.get("by_category") or {}
                     recent_memories     = _d.get("recent_memories") or []
+                    # Grab error details if the stats response includes them
+                    error_log           = _d.get("error_log") or _d.get("recent_errors") or []
                 if apollo_ok:
                     _rm = await _hx.get(f"{MEMORY_SERVICE_URL}/ed/missions/active")
                     if _rm.status_code == 200:
                         active_missions = _rm.json().get("missions", [])
-        except Exception:
-            pass
+                    # Try a dedicated errors endpoint if error_log is still empty
+                    if not error_log and mem_errors and mem_errors not in ("---", 0):
+                        try:
+                            _re = await _hx.get(f"{MEMORY_SERVICE_URL}/errors")
+                            if _re.status_code == 200:
+                                _ed = _re.json()
+                                error_log = _ed.get("errors") or _ed.get("error_log") or []
+                        except Exception:
+                            pass
+                # Merge locally tracked errors (always shown)
+                if _stats["memory_error_log"]:
+                    local_entries = [
+                        e for e in _stats["memory_error_log"]
+                        if not any(
+                            isinstance(x, dict) and x.get("message") == e["message"]
+                            for x in error_log
+                        )
+                    ]
+                    error_log = local_entries + error_log
+                # Use local error count if Apollo didn't report one
+                if mem_errors in ("---", 0) and error_log:
+                    mem_errors = len(error_log)
+        except Exception as _fetch_ex:
+            _record_memory_error(str(_fetch_ex), "Apollo /stats fetch")
 
     apollo_cls = "ok" if apollo_ok else ("err" if _memory is not None else "dim")
     apollo_lbl = "ONLINE" if apollo_ok else ("UNREACHABLE" if _memory is not None else "DISABLED")
@@ -908,13 +1214,39 @@ async def status_page():
     if not mission_rows:
         mission_rows = '<tr><td colspan="5" class="empty-cell">NO ACTIVE MISSIONS ON RECORD</td></tr>'
 
+    # Build error log rows
+    error_rows = ""
+    for err in error_log:
+        if isinstance(err, dict):
+            ts  = str(err.get("timestamp") or err.get("created_at") or "")[:19].replace("T", " ")
+            msg = err.get("message") or err.get("error") or str(err)
+            ctx = err.get("context") or err.get("source") or ""
+        else:
+            ts  = ""
+            msg = str(err)
+            ctx = ""
+        error_rows += (
+            f'<tr>'
+            f'<td class="ts-cell">{ts}</td>'
+            f'<td style="color:var(--err);font-size:12px;word-break:break-word">{msg}</td>'
+            f'<td class="sum-txt">{ctx}</td>'
+            f'</tr>'
+        )
+    if not error_rows:
+        if mem_errors not in ("---", 0, "0"):
+            error_rows = '<tr><td colspan="3" class="empty-cell">ERROR DETAILS NOT AVAILABLE FROM APOLLO</td></tr>'
+        else:
+            error_rows = '<tr><td colspan="3" class="empty-cell">NO ERRORS RECORDED</td></tr>'
+
+    error_btn_style = 'cursor:pointer;text-decoration:underline;text-underline-offset:3px' if mem_errors not in ("---", 0, "0") else ''
+    error_onclick   = 'onclick="openModal(\'errors\')"' if mem_errors not in ("---", 0, "0") else ''
+
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="refresh" content="10">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>COVAS // SYSTEM STATUS</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1105,6 +1437,74 @@ async def status_page():
       background:linear-gradient(90deg, var(--or), var(--am), var(--teal));
       margin: 0;
     }}
+
+    /* ── CENTER MODAL ── */
+    .modal-overlay {{
+      display:none; position:fixed; inset:0; z-index:300;
+      background:rgba(0,0,0,0.75); backdrop-filter:blur(4px);
+      align-items:center; justify-content:center;
+    }}
+    .modal-overlay.open {{ display:flex; }}
+    .modal-box {{
+      width:min(860px, 94vw); max-height:80vh;
+      background:var(--bg2); border:1px solid var(--border);
+      display:flex; flex-direction:column; position:relative;
+      box-shadow:0 0 60px rgba(0,0,0,0.8), 0 0 1px var(--or);
+    }}
+    .modal-hdr {{
+      display:flex; align-items:stretch;
+      border-bottom:1px solid var(--border);
+      background:linear-gradient(180deg, #0b1020 0%, var(--bg2) 100%);
+      flex-shrink:0;
+    }}
+    .modal-tab {{
+      padding:14px 28px;
+      font-family:var(--head); font-size:12px; font-weight:600;
+      letter-spacing:3px; text-transform:uppercase;
+      color:var(--dim); cursor:pointer; border-bottom:2px solid transparent;
+      transition:color 0.15s, border-color 0.15s;
+    }}
+    .modal-tab:hover {{ color:var(--hi); }}
+    .modal-tab.active {{ color:var(--or); border-bottom-color:var(--or); }}
+    .modal-close {{
+      margin-left:auto; padding:14px 20px;
+      color:var(--dim); cursor:pointer; font-size:18px; line-height:1;
+      transition:color 0.15s;
+    }}
+    .modal-close:hover {{ color:var(--or); }}
+    .modal-body {{
+      overflow-y:auto; flex:1; min-height:0;
+    }}
+    .modal-pane {{ display:none; }}
+    .modal-pane.active {{ display:flex; flex-direction:column; flex:1; min-height:0; overflow-y:auto; }}
+
+    /* Log viewer */
+    .log-viewer {{
+      font-family:var(--mono); font-size:12px; line-height:1.7;
+      padding:16px 20px; color:var(--text); white-space:pre-wrap; word-break:break-word;
+      flex:1; min-height:200px;
+    }}
+    .log-line-sep   {{ color:var(--or); opacity:0.5; }}
+    .log-line-hdr   {{ color:var(--am); }}
+    .log-line-covas {{ color:var(--hi); }}
+    .log-line-cmd   {{ color:var(--ok); opacity:0.8; }}
+    .log-line-tool  {{ color:var(--teal); }}
+    .log-line-err   {{ color:var(--err); }}
+    .log-line-warn  {{ color:var(--warn); }}
+    .log-line-dim   {{ color:var(--dim); font-size:11px; }}
+
+    .modal-toolbar {{
+      display:flex; align-items:center; gap:12px; padding:10px 20px;
+      border-bottom:1px solid var(--border); background:var(--bg); flex-shrink:0;
+    }}
+    .modal-toolbar label {{ font-family:var(--head); font-size:11px; letter-spacing:2px; color:var(--dim); }}
+    .modal-toolbar input[type=range] {{ accent-color:var(--or); }}
+    .mtb-btn {{
+      padding:5px 14px; background:transparent; border:1px solid var(--dim);
+      color:var(--dim); font-family:var(--mono); font-size:11px;
+      cursor:pointer; letter-spacing:1px; transition:all 0.15s; margin-left:auto;
+    }}
+    .mtb-btn:hover {{ border-color:var(--or); color:var(--or); }}
   </style>
 </head>
 <body>
@@ -1135,6 +1535,7 @@ async def status_page():
     <span class="dim" style="font-weight:300">{apollo_lbl}</span>
   </div>
   <div class="spill right">&#8635;&nbsp; AUTO&#8209;REFRESH 10s</div>
+  <div class="spill right" style="cursor:pointer;color:var(--or)" onclick="openModal('log')">&#9632;&nbsp; SESSION LOG</div>
 </div>
 
 <div class="t-preview-bar"></div>
@@ -1160,10 +1561,10 @@ async def status_page():
     <div class="blbl">Active Missions</div>
     <div class="bsub">{mem_db_missions} total logged</div>
   </div>
-  <div class="bstat">
+  <div class="bstat" {error_onclick} style="{error_btn_style}">
     <div class="bnum" style="color:{err_color}">{mem_errors}</div>
     <div class="blbl">Memory Errors</div>
-    <div class="bsub">processing faults</div>
+    <div class="bsub">processing faults{' — click to inspect' if mem_errors not in ('---', 0, '0') else ''}</div>
   </div>
 </div>
 
@@ -1197,7 +1598,7 @@ async def status_page():
   </div>
   <div>
     <div class="panel" style="height:100%">
-      <div class="ptitle">Recent Memories</div>
+      <div class="ptitle" style="cursor:pointer" onclick="openModal('memories')">Recent Memories <span style="font-size:10px;color:var(--dim);margin-left:8px">▶ expand</span></div>
       <table class="mtable">
         <thead><tr>
           <th style="width:110px">Timestamp</th>
@@ -1222,6 +1623,58 @@ async def status_page():
   <div class="footer-brand">COVAS LOCAL AI BRIDGE</div>
   <div><span>MODEL:</span> {OLLAMA_MODEL} &nbsp;&#9642;&nbsp; <span>TEMP:</span> {TEMPERATURE} &nbsp;&#9642;&nbsp; <span>PORT:</span> {SERVER_PORT}</div>
   <div><span>APOLLO:</span> {MEMORY_SERVICE_URL}</div>
+</div>
+
+<!-- CENTER MODAL — Log Viewer / Memories / Errors -->
+<div class="modal-overlay" id="modal-overlay" onclick="overlayClick(event)">
+  <div class="modal-box">
+    <div class="modal-hdr">
+      <div class="modal-tab active" id="tab-log"      onclick="switchTab('log')">&#9632;&nbsp; Session Log</div>
+      <div class="modal-tab"        id="tab-memories" onclick="switchTab('memories')">&#9632;&nbsp; Recent Memories</div>
+      <div class="modal-tab"        id="tab-errors"   onclick="switchTab('errors')" style="color:{'var(--err)' if mem_errors not in ('---', 0, '0') else 'var(--dim)'}">&#9632;&nbsp; Errors ({mem_errors})</div>
+      <div class="modal-close" onclick="closeModal()">&#x2715;</div>
+    </div>
+
+    <!-- LOG PANE -->
+    <div class="modal-pane active" id="pane-log">
+      <div class="modal-toolbar">
+        <label>LINES</label>
+        <input type="range" id="log-lines-slider" min="50" max="600" step="50" value="300" oninput="this.nextElementSibling.textContent=this.value">
+        <span style="font-size:12px;color:var(--hi);width:32px">300</span>
+        <button class="mtb-btn" onclick="loadLog()">&#8635; Refresh</button>
+      </div>
+      <div class="log-viewer" id="log-content">Loading...</div>
+    </div>
+
+    <!-- MEMORIES PANE -->
+    <div class="modal-pane" id="pane-memories">
+      <table class="mtable">
+        <thead><tr>
+          <th style="width:110px">Timestamp</th>
+          <th style="width:130px">Category</th>
+          <th>Topic &amp; Summary</th>
+        </tr></thead>
+        <tbody>{mem_rows}</tbody>
+      </table>
+    </div>
+
+    <!-- ERRORS PANE -->
+    <div class="modal-pane" id="pane-errors">
+      <div class="modal-toolbar">
+        <label id="error-count-label">Loading...</label>
+        <button class="mtb-btn" onclick="loadErrors()">&#8635; Refresh</button>
+        <button class="mtb-btn" onclick="clearErrors()" style="border-color:var(--err);color:var(--err);margin-left:8px">&#x2715; Clear All</button>
+      </div>
+      <table class="mtable">
+        <thead><tr>
+          <th style="width:130px">Timestamp</th>
+          <th>Error</th>
+          <th style="width:160px">Context</th>
+        </tr></thead>
+        <tbody>{error_rows}</tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
 <!-- THEME TRIGGER (always visible bottom-right) -->
@@ -1261,6 +1714,31 @@ async def status_page():
 </div>
 
 <script>
+// ── AUTO-REFRESH (pauses when any panel is open) ──────────────────────────────
+
+let _refreshTimer   = null;
+let _refreshPaused  = false;
+const REFRESH_MS    = 10_000;
+
+function _scheduleRefresh() {{
+  clearTimeout(_refreshTimer);
+  if (!_refreshPaused) {{
+    _refreshTimer = setTimeout(() => location.reload(), REFRESH_MS);
+  }}
+}}
+
+function _pauseRefresh() {{
+  _refreshPaused = true;
+  clearTimeout(_refreshTimer);
+}}
+
+function _resumeRefresh() {{
+  _refreshPaused = false;
+  _scheduleRefresh();
+}}
+
+_scheduleRefresh();
+
 // ── THEME ENGINE ──────────────────────────────────────────────────────────────
 
 const STORAGE_KEY = 'covas_active_theme';
@@ -1454,12 +1932,119 @@ function handleThemeUpload(event) {{
   reader.readAsText(file);
 }}
 
+// ── MODAL ENGINE ──────────────────────────────────────────────────────────────
+
+const CAT_COLORS = {{
+  general:'#c89040', elite_dangerous:'#ff8020', person:'#60b8d8',
+  place:'#80c860', preference:'#a878cc', task:'#e06050'
+}};
+
+let _activeTab = 'log';
+
+function openModal(tab) {{
+  tab = tab || 'log';
+  _pauseRefresh();
+  document.getElementById('modal-overlay').classList.add('open');
+  switchTab(tab);
+  if (tab === 'log') loadLog();
+  if (tab === 'errors') loadErrors();
+}}
+
+function closeModal() {{
+  document.getElementById('modal-overlay').classList.remove('open');
+  _resumeRefresh();
+}}
+
+function overlayClick(e) {{
+  if (e.target === document.getElementById('modal-overlay')) closeModal();
+}}
+
+function switchTab(tab) {{
+  _activeTab = tab;
+  ['log','memories','errors'].forEach(t => {{
+    document.getElementById('tab-' + t).classList.toggle('active', t === tab);
+    document.getElementById('pane-' + t).classList.toggle('active', t === tab);
+  }});
+  if (tab === 'errors') loadErrors();
+}}
+
+// ── LOG LOADER ────────────────────────────────────────────────────────────────
+
+function colorizeLine(line) {{
+  const esc = line.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  if (/^={3,}/.test(line))                return `<span class="log-line-sep">${{esc}}</span>`;
+  if (/SESSION START/.test(line))         return `<span class="log-line-hdr">${{esc}}</span>`;
+  if (/^\\[.*\\] COVAS$/.test(line.trim())) return `<span class="log-line-covas">${{esc}}</span>`;
+  if (/^\\[.*\\] COMMANDER$/.test(line.trim())) return `<span class="log-line-cmd">${{esc}}</span>`;
+  if (/\\[TOOL/.test(line))                return `<span class="log-line-tool">${{esc}}</span>`;
+  if (/ERROR|FAULT|CRITICAL/.test(line))  return `<span class="log-line-err">${{esc}}</span>`;
+  if (/WARN|warn/.test(line))             return `<span class="log-line-warn">${{esc}}</span>`;
+  if (/^─+/.test(line))                   return `<span class="log-line-dim">${{esc}}</span>`;
+  return esc;
+}}
+
+async function loadLog() {{
+  const n = document.getElementById('log-lines-slider').value;
+  const el = document.getElementById('log-content');
+  el.textContent = 'Loading...';
+  try {{
+    const r = await fetch(`/api/log?lines=${{n}}`);
+    const d = await r.json();
+    el.innerHTML = d.lines.map(colorizeLine).join('\\n');
+    el.scrollTop = el.scrollHeight;
+  }} catch(e) {{
+    el.textContent = 'Failed to load log: ' + e;
+  }}
+}}
+
+async function loadErrors() {{
+  const tbody = document.querySelector('#pane-errors table tbody');
+  const label = document.getElementById('error-count-label');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="3" class="empty-cell">Loading...</td></tr>';
+  try {{
+    const r = await fetch('/api/errors');
+    const d = await r.json();
+    if (label) label.textContent = `${{d.total || 0}} ERRORS`;
+    if (!d.errors || !d.errors.length) {{
+      tbody.innerHTML = '<tr><td colspan="3" class="empty-cell">NO ERRORS RECORDED</td></tr>';
+      return;
+    }}
+    tbody.innerHTML = d.errors.map(e => {{
+      const ts  = (e.timestamp || '').replace('T',' ').substring(0,19);
+      const msg = (e.message || String(e)).replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const ctx = (e.context || '').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      return `<tr>
+        <td class="ts-cell">${{ts}}</td>
+        <td style="color:var(--err);font-size:12px;word-break:break-word">${{msg}}</td>
+        <td class="sum-txt">${{ctx}}</td>
+      </tr>`;
+    }}).join('');
+  }} catch(err) {{
+    tbody.innerHTML = `<tr><td colspan="3" class="empty-cell">Failed to load: ${{err}}</td></tr>`;
+  }}
+}}
+
+async function clearErrors() {{
+  const btn = document.querySelector('#pane-errors .mtb-btn:last-child');
+  if (btn) {{ btn.textContent = 'Clearing...'; btn.disabled = true; }}
+  try {{
+    await fetch('/api/errors', {{ method: 'DELETE' }});
+    await loadErrors();
+  }} catch(err) {{
+    console.error('Clear errors failed:', err);
+  }} finally {{
+    if (btn) {{ btn.textContent = '✕ Clear All'; btn.disabled = false; }}
+  }}
+}}
+
 // ── PANEL TOGGLE ──────────────────────────────────────────────────────────────
 
 function toggleThemePanel() {{
   const drawer = document.getElementById('theme-drawer');
   const isOpen = drawer.classList.toggle('open');
-  if (isOpen) loadServerThemes();
+  if (isOpen) {{ _pauseRefresh(); loadServerThemes(); }}
+  else         {{ _resumeRefresh(); }}
 }}
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
@@ -1475,7 +2060,6 @@ restoreTheme();
 
 
 # ── Theme API ─────────────────────────────────────────────────────────────────
-import glob
 
 @app.get("/api/themes")
 def list_themes():
@@ -1501,13 +2085,46 @@ def list_themes():
 @app.get("/api/themes/{name}")
 def get_theme(name: str):
     """Return the full ThemeSettings.json for a given theme folder name."""
-    # Sanitise name to prevent path traversal
     safe = os.path.basename(name)
     path = os.path.join(THEMES_DIR, safe, "ThemeSettings.json")
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="Theme not found")
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+@app.get("/api/log")
+def get_log(lines: int = 300):
+    """Return the last N lines of the session log as plain text."""
+    if not os.path.exists(LOG_FILE):
+        return {"lines": [], "total": 0}
+    try:
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
+            all_lines = f.readlines()
+        tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        return {"lines": [l.rstrip("\n") for l in tail], "total": len(all_lines)}
+    except Exception as e:
+        return {"lines": [f"Error reading log: {e}"], "total": 0}
+
+@app.get("/api/errors")
+def get_errors():
+    """Return locally tracked memory/system errors."""
+    return {
+        "errors": list(reversed(_stats["memory_error_log"])),
+        "total":  len(_stats["memory_error_log"]),
+    }
+
+@app.delete("/api/errors")
+async def clear_errors():
+    """Clear local error log and proxy the clear to Apollo."""
+    _stats["memory_error_log"].clear()
+    # Best-effort clear on Apollo too
+    if _memory is not None:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as hx:
+                await hx.delete(f"{MEMORY_SERVICE_URL}/errors")
+        except Exception:
+            pass
+    return {"status": "cleared"}
 
 @app.get("/v1/models")
 def list_models():
@@ -1559,6 +2176,16 @@ async def chat_completions(req: ChatRequest):
                 "\n\nCURRENT MESSAGE is an automated game event notification. "
                 "Respond with one brief in-character sentence at most, or stay silent. "
                 "Do not search for any names, ships, or systems mentioned in it."
+            )
+
+        # For diagnostic requests, override the brevity rule
+        if is_diagnostic_request(user_msg):
+            system_content += (
+                "\n\nCURRENT MESSAGE requests a full system diagnostic. "
+                "When the get_system_status tool returns data, present ALL sections completely — "
+                "navigation, ship systems, modules, environmental, and COVAS core. "
+                "Include every reading provided. Do not summarise or truncate. "
+                "Speak in character, but the Commander needs the full picture."
             )
 
         lc_messages = [SystemMessage(content=system_content)]
