@@ -36,13 +36,13 @@ Apollo runs on port `8100`. UNIT-01 reaches it over the local network or Tailsca
 │               UNIT-01                   │     │              Apollo              │
 │                                         │     │                                  │
 │  Elite Dangerous ──► COVAS:NEXT         │     │  Docker                          │
-│                          │              │     │  ├── ollama  (phi3:mini)          │
+│                          │              │     │  ├── ollama  (phi3:mini)         │
 │                          ▼              │     │  └── covas-memory  :8100         │
 │               ship_ai_server.py :8080   │────►│       ├── /ingest                │
 │               covas_memory_client.py    │◄────│       ├── /stats                 │
 │                          │              │     │       ├── /errors                │
-│                          ▼              │     │       ├── /memories/recent        │
-│               Ollama (llama3.1:8b)      │     │       └── /ed/missions/active     │
+│                          ▼              │     │       ├── /memories/recent       │
+│               Ollama (llama3.1:8b)      │     │       └── /ed/missions/active    │
 └─────────────────────────────────────────┘     └──────────────────────────────────┘
 ```
 
