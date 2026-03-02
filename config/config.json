@@ -1,0 +1,33 @@
+{
+  "ollama_base_url": "http://localhost:11434",
+  "ollama_model": "llama3.1:8b",
+  "server_host": "0.0.0.0",
+  "server_port": 8082,
+  "temperature": 0.7,
+  "max_history_messages": 10,
+  "request_timeout_sec": 120,
+  "search_cache_size": 50,
+
+  "_comment_inara": "Optional: your INARA API key from https://inara.cz/elite/cmdr-settings-api/ — not currently required, reserved for future direct API queries",
+  "inara_api_key": "a3feexauo0ocgo480gcgg8kc4gk8ow8sssck8kw",
+
+  "memory_service_url": "http://100.120.129.90:8100",
+
+  "_comment_history": "Minutes of inactivity before conversation history is cleared on the next request",
+  "history_gap_minutes": 8,
+
+  "_comment_memory": "Long-term memory settings",
+  "memory_enabled": true,
+  "memory_max_entries": 120,
+  "memory_min_keywords": 2,
+  "max_memories_recalled": 5,
+
+  "_comment_log": "How many past sessions to keep in covas_session.log before purging older ones",
+  "log_max_sessions": 5,
+
+  "_comment_tools": "Max tool-call rounds per request before returning what the model has so far",
+  "max_tool_iterations": 5,
+
+  "_comment_search": "Number of results fetched per web search (applies to both INARA and general searches)",
+  "max_search_results": 5
+}
