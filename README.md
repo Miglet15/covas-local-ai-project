@@ -1,6 +1,6 @@
 # COVAS Local AI — Ship AI Bridge
 
-> a local LLM middleware layer for [COVAS:NEXT](https://github.com/RatherRude/Elite-Dangerous-AI-Integration), because paying per-token to talk to my spaceship felt morally wrong  
+> a local LLM middleware layer for [COVAS:NEXT](https://github.com/RatherRude/Elite-Dangerous-AI-Integration), because paying per-token to talk to my spaceship felt morally incorrect  
 > vibe-coded with Claude. it works. mostly.
 
 ---
@@ -104,7 +104,7 @@ python ship_ai_server.py
 
 or on windows, double-click `start_ship_ai.bat`.
 
-status page available at `http://localhost:<port>/` — confirms it's running and shows current config.
+once running, the server exposes a status dashboard at `http://localhost:<port>/` — see the [status page](#status-page) section below for what it shows and how it's styled.
 
 **6. point COVAS:NEXT at it**
 
@@ -135,6 +135,21 @@ covas-local-ai-project/
 ├── start_ship_ai.bat            # windows launcher
 └── README.md
 ```
+
+---
+
+## status page
+
+the server serves a local status dashboard at `http://localhost:<port>/` that gives you a live at-a-glance view of what's running:
+
+- server health and current config (model, port, temperature)
+- memory service connection status
+- recent session activity and memory count
+- current ship state if one has been received
+
+it auto-refreshes so you can leave it open in a browser tab while you're playing.
+
+**EDHM-UI theming** — the page is styled using theme files from [EDHM-UI](https://github.com/BlueMystical/EDHM_UI), the HUD mod UI for Elite Dangerous. so instead of looking like a generic FastAPI debug page, it actually matches the aesthetic of the game — dark panels, the right kind of orange/amber tones, feels like something that belongs in the cockpit rather than a Python project. the theme files live in the repo alongside the server and are served statically.
 
 ---
 
@@ -170,6 +185,7 @@ covas-local-ai-project/
 
 - **[covas-apollo-project](https://github.com/Miglet15/covas-apollo-project/)** — the companion memory service. run this too
 - [COVAS:NEXT](https://github.com/RatherRude/Elite-Dangerous-AI-Integration) — the actual Elite Dangerous integration this bridges to. the real project. go star it
+- [EDHM-UI](https://github.com/BlueMystical/EDHM_UI) — HUD color mod for Elite Dangerous, theme files used for the status page
 - [Ollama](https://ollama.com/) — local model runtime
 - [INARA](https://inara.cz/) — Elite Dangerous companion site, used for faction/system lookups
 
